@@ -269,11 +269,21 @@
                 }
             }
 
+            // Draw Last Move Marker
+            if (lastMoveObj) {
+                board.addObject({
+                    type: "CR",
+                    x: lastMoveObj.x,
+                    y: lastMoveObj.y,
+                    c: lastMoveObj.c === WGo.B ? "white" : "black"
+                });
+            }
+
             updateUI(game);
             
              // Toggle Chart Visibility
             const chartContainer = document.getElementById('winrate-container');
-            if (isTrialMode || aiMode !== 'NONE') {
+            if (isTrialMode) {
                 chartContainer.style.display = 'none';
             } else {
                 chartContainer.style.display = 'block';
@@ -295,19 +305,10 @@
             const statusDiv = document.getElementById('status');
             const statusText = `第 ${isTrialMode?trialStartStep+currentTrialStep : currentStep} 手 Turn: ${game.turn === WGo.B ? 'Black' : 'White'}`;
             
-            if (aiMode === 'NONE') {
-                 statusDiv.innerText = statusText + (isTrialMode ? " [试下]" : "");
-                 document.getElementById('slider').value = currentStep;
-                 document.getElementById('slider').disabled = isTrialMode;
-            } else if (aiMode === 'SELECTION') {
-                 statusDiv.innerText = "请选择绿色落点查看 AI 演化";
-                 document.getElementById('status').style.color = "#8e44ad";
-            } else if (aiMode === 'EVOLUTION') {
-                 statusDiv.innerText = "AI 10步 演化演示";
-                 document.getElementById('status').style.color = "#2ecc71";
-            } else {
-                 document.getElementById('status').style.color = "white";
-            }
+            statusDiv.innerText = statusText + (isTrialMode ? " [试下]" : "");
+            document.getElementById('slider').value = currentStep;
+            document.getElementById('slider').disabled = isTrialMode;
+            document.getElementById('status').style.color = "white";
             
             board.currentTurnColor = game.turn;
         }

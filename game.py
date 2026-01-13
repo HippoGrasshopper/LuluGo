@@ -20,9 +20,6 @@ class GameEngine:
                 self.board.play(row, col, color)
             self._record_state()
 
-    # _replay_moves 方法已废弃，直接在 __init__ 中快速执行
-
-
     def reset(self):
         self.board = boards.Board(self.size)
         self.history_hashes = set()

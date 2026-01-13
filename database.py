@@ -101,10 +101,6 @@ def create_game(creator_id: int, creator_color: str) -> Game:
             game.white_player_id = creator_id
         else:
             # 猜先模式：暂时先不管黑白，或者随机分配。
-            # 为了简单，我们规定：猜先模式下，创建者先暂定为黑，
-            # 等人齐了(join logic)再决定是否交换。
-            # 这里我们用一个特殊的约定：
-            # 如果是 '?'，我们先让他坐黑方，但在 Game 表里加个标记？
             # 不，最简单的做法是：随机分配。
             import random
             is_black = random.choice([True, False])
