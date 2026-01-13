@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LuluGo - 登录</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+        }
+        h1 { color: #333; margin-bottom: 30px; }
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .btn-login { background: #667eea; color: white; }
+        .btn-register { background: #f093fb; color: white; }
+        button:hover { transform: scale(1.05); }
+        .error { color: #e74c3c; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌸 LuluGo</h1>
+        <input type="text" id="username" placeholder="输入用户名" />
+        <button class="btn-login" onclick="login()">登录</button>
+        <button class="btn-register" onclick="register()">注册新用户</button>
+        <div class="error" id="error"></div>
+        <div style="margin-top: 20px; font-size: 0.8em; opacity: 0.5;">
+            <a href="/static/admin.html" style="color: #666; text-decoration: none;">(管理员入口)</a>
+        </div>
+    </div>
+
+    <script>
+        async function login() {
+            const username = document.getElementById('username').value.trim();
+            if (!username) {
+                document.getElementById('error').innerText = "请输入用户名";
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username})
+                });
+                
+                const data = await res.json();
+                if (data.success) {
+                    sessionStorage.setItem('user_id', data.user_id);
+                    sessionStorage.setItem('username', data.username);
+                    window.location.href = '/static/lobby.html';
+                } else {
+                    document.getElementById('error').innerText = "用户不存在";
+                }
+            } catch (e) {
+                document.getElementById('error').innerText = "用户不存在";
+            }
+        }
+
+        async function register() {
+            const username = document.getElementById('username').value.trim();
+            if (!username) {
+                document.getElementById('error').innerText = "请输入用户名";
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username})
+                });
+                
+                const data = await res.json();
+                if (data.success) {
+                    alert("注册成功！请登录");
+                    document.getElementById('error').innerText = "";
+                } else {
+                    document.getElementById('error').innerText = "用户名已存在";
+                }
+            } catch (e) {
+                document.getElementById('error').innerText = "注册失败";
+            }
+        }
+
+        document.getElementById('username').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') login();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>LuluGo - 管理员</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .game-item { padding: 10px; border-bottom: 1px solid #ccc; display: flex; justify-content: space-between; }
+        .btn-del { background: red; color: white; border: none; padding: 5px 10px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>管理员面板</h1>
+    <div id="list"></div>
+    <script>
+        async function load() {
+            // Load waiting, playing, history
+            const w = await (await fetch('/api/games/waiting')).json();
+            const p = await (await fetch('/api/games/playing')).json();
+            const h = await (await fetch('/api/games/history')).json();
+            const all = [...w.games, ...p.games, ...h.games];
+            
+            document.getElementById('list').innerHTML = all.map(g => `
+                <div class="game-item">
+                    <span>#${g.id} (${g.status}) - 黑:${g.black} 白:${g.white}</span>
+                    <button class="btn-del" onclick="del(${g.id})">删除</button>
+                </div>
+            `).join('');
+        }
+        
+        async function del(id) {
+            if(confirm('Confirm delete?')) {
+                await fetch(`/api/games/${id}`, { method: 'DELETE' });
+                load();
+            }
+        }
+        load();
+    </script>
+</body>
+</html>

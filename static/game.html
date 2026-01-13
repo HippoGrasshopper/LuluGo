@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LuluGo - 对弈</title>
+    <script src="wgo.min.js"></script>
+    <script src="socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #2c3e50;
+            color: white;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+        #status { padding: 20px; font-size: 1.2em; font-weight: bold; }
+        #board-container {
+            width: 90vw;
+            max-width: 600px;
+            aspect-ratio: 1 / 1;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .btn-group { display: flex; gap: 10px; margin: 20px; flex-wrap: wrap; justify-content: center;}
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            background: #3498db;
+            color: white;
+            cursor: pointer;
+        }
+        button:hover { background: #2980b9; }
+        .btn-undo { background: #f39c12; }
+        .btn-resign { background: #e74c3c; }
+        .btn-ai { background: #8e44ad; }
+        .btn-count { background: #16a085; }
+        /* .btn-back { background: #95a5a6; } No longer used in bottom group */
+        
+        .btn-top-back {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            padding: 8px 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            font-size: 0.9em;
+            z-index: 100;
+        }
+        .btn-top-back:hover { background: rgba(255, 255, 255, 0.2); }
+    </style>
+</head>
+<body>
+    <button class="btn-top-back" onclick="back()">⬅ 大厅</button>
+
+    <div id="game-info" style="display:flex; justify-content:space-around; width:100%; max-width:600px; padding:10px; background:#34495e; margin: 50px 0 10px 0; border-radius:8px;">
+        <div id="black-player">⚫ 黑方: ???</div>
+        <div id="turn-indicator" style="font-weight:bold; color:#f1c40f;">加载中...</div>
+        <div id="white-player">⚪ 白方: ???</div>
+    </div>
+    
+    <div id="board-container"></div>
+    <div id="status" style="font-size:0.9em; color:#bdc3c7; height:20px;"></div>
+    
+    <div class="btn-group">
+        <button class="btn-undo" onclick="undo()">悔棋</button>
+        <button class="btn-resign" onclick="resign()">认输</button>
+        <button class="btn-ai" onclick="estimateScore()">形势判断</button>
+        <button class="btn-count" onclick="requestCount()">开始数目</button>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const gameId = parseInt(urlParams.get('id'));
+        const userId = parseInt(sessionStorage.getItem('user_id'));
+
+        const socket = io();
+        let currentStones = [];
+        let nextTurn = 'B';
+        let lastMove = null;
+        let myColor = null; // 'B' or 'W' or null (spectator)
+        let ghostStone = null;
+        let pendingCoord = null; // 待确认的坐标 {x, y, gtp}
+
+        let isSubmitting = false;
+
+        const board = new WGo.Board(document.getElementById('board-container'), {
+            width: 600,
+            size: 19,
+            background: "#DCB35C"
+        });
+
+        // Register custom draw handler for Solid Square (Ownership)
+        WGo.Board.drawHandlers.FILL_SQ = {
+            draw: function(args, board) {
+                var xr = board.getX(args.x),
+                    yr = board.getY(args.y),
+                    sr = board.stoneRadius * 0.8; // Slightly smaller than full stone
+                
+                var ctx = board.getContext();
+                ctx.save();
+                ctx.fillStyle = args.c || "rgba(0,0,0,0.5)";
+                ctx.beginPath();
+                ctx.rect(xr - sr, yr - sr, 2*sr, 2*sr);
+                ctx.fill();
+                ctx.restore();
+            }
+        };
+
+        let showingEstimate = false;
+        let estimateData = null;
+
+        socket.on('connect', () => {
+            socket.emit('auth', {user_id: userId});
+            socket.emit('join_room', {game_id: gameId});
+        });
+
+        socket.on('board_update', (data) => {
+            console.log("Board Update:", data);
+            isSubmitting = false; // 服务器返回了，解除锁定，如果之前是乐观更新，现在会被权威状态覆盖
+            currentStones = data.moves;
+            nextTurn = data.turn;
+            lastMove = data.last_move;
+            pendingCoord = null; // 每次更新盘面都重置待确认状态
+            
+            // 确定我的颜色 (仅当包含身份信息时处理)
+            if (data.is_player !== undefined) {
+                if (data.is_player) {
+                    if (data.black_id === userId) myColor = 'B';
+                    else if (data.white_id === userId) myColor = 'W';
+                } else {
+                    myColor = null;
+                }
+            }
+
+            // 更新玩家信息
+            if (data.black_name) document.getElementById('black-player').innerText = `⚫ 黑方: ${data.black_name}` + (myColor === 'B' ? " (你)" : "");
+            if (data.white_name) document.getElementById('white-player').innerText = `⚪ 白方: ${data.white_name}` + (myColor === 'W' ? " (你)" : "");
+            
+            // 更新轮次指示
+            const turnText = nextTurn === 'B' ? '黑棋下' : '白棋下';
+            const ind = document.getElementById('turn-indicator');
+            
+            // 状态同步
+            const statusDiv = document.getElementById('status');
+            
+            if (data.status === "WAITING") {
+                ind.innerText = "等待开始...";
+                ind.style.backgroundColor = "#7f8c8d";
+                ind.style.color = "white";
+                statusDiv.innerText = "等待对手加入...";
+            } else {
+                ind.innerText = `Current: ${turnText}`;
+                ind.style.backgroundColor = nextTurn === 'B' ? 'black' : 'white'; 
+                ind.style.color = nextTurn === 'B' ? 'white' : 'black';
+                statusDiv.innerText = `手数: ${currentStones.length} | 上一步: ${lastMove || '无'}`;
+            }
+            
+            ind.style.padding = "2px 8px";
+            ind.style.borderRadius = "4px";
+
+            // 按钮显示逻辑
+            if (data.is_player !== undefined) {
+                if (data.is_player === false) {
+                    document.querySelector('.btn-group').style.display = 'none';
+                    if(!statusDiv.innerText.includes("旁观")) {
+                        statusDiv.innerText += " (旁观模式)";
+                    }
+                } else {
+                    document.querySelector('.btn-group').style.display = 'flex';
+                }
+            }
+
+            renderBoard();
+        });
+
+        socket.on('game_start', (data) => {
+             console.log("Game Start event received"); 
+             // 主要是 board_update 处理了状态，这里不需要做什么特殊的，
+             // 或者可以加一个视觉效果
+        });
+
+        socket.on('game_over', (data) => {
+            let msg = `游戏结束！${data.result}`;
+            if (data.result === 'B+Resign') msg = "游戏结束！黑棋中盘胜 (白认输)";
+            if (data.result === 'W+Resign') msg = "游戏结束！白棋中盘胜 (黑认输)";
+
+            alert(msg);
+            
+            // 禁用按钮，锁定棋盘（虽然服务端已经不接受move了，但前端也可以封住）
+            document.querySelector('.btn-undo').disabled = true;
+            document.querySelector('.btn-resign').disabled = true;
+            document.querySelector('.btn-group').innerHTML = 
+                `<button class="btn-back" onclick="back()" style="flex:1; background:#8e44ad; font-weight:bold;">返回大厅</button>`;
+            
+            // 状态栏更新
+            document.getElementById('turn-indicator').innerText = "游戏对局结束";
+            document.getElementById('status').innerText = msg;
+        });
+
+        socket.on('error', (data) => {
+            if (isSubmitting) {
+                 isSubmitting = false;
+                 // 如果之前进行了乐观更新，需要撤销
+                 // 简单做法：移除 currentStones 最后一个子 (我们刚才 push 进去的)
+                 // 注意：只有当我们确认是自己在提交时才这么做
+                 currentStones.pop(); 
+                 renderBoard();
+            }
+            alert(data.msg);
+        });
+
+        function renderBoard() {
+            try {
+                // 清除所有对象（包括以前的ghost stones）
+                board.removeAllObjects();
+                ghostStone = null; 
+                // 注意：pendingCoord 不要在这里清空，因为我们可能只是重绘
+
+                // 绘制已有棋子
+                currentStones.forEach(stone => {
+                    const [color, coord] = stone;
+                    const pos = fromGTP(coord);
+                    
+                    let c = WGo.B;
+                    if (color === 'W') c = WGo.W;
+                    
+                    board.addObject({x: pos.x, y: pos.y, c: c});
+                    
+                    // 标记最后一步
+                    if (coord === lastMove) {
+                        board.addObject({
+                            type: "CR",
+                            x: pos.x, y: pos.y,
+                            c: (color === 'B') ? "rgba(255,255,255,0.8)" : "rgba(0,0,0,0.8)"
+                        });
+                    }
+                });
+
+                // 如果有待确认的子，绘制出来 (虚化的棋子/Outline)
+                if (pendingCoord) {
+                    const c = (myColor === 'B') ? WGo.B : WGo.W;
+                    board.addObject({ 
+                        x: pendingCoord.x, 
+                        y: pendingCoord.y, 
+                        c: c,
+                        type: "outline"
+                    });
+                }
+
+                // 绘制形势判断 (Solid Squares)
+                if (showingEstimate && estimateData && estimateData.ownership) {
+                    for(let x=0; x<19; x++) {
+                        for(let y=0; y<19; y++) {
+                            const val = estimateData.ownership[x][y]; 
+                            if (Math.abs(val) > 0.5) { 
+                                // 检查是否已有棋子 -> 如果有棋子，通常 ownership 也是确定的，
+                                // 用户可能希望看到实地覆盖在棋子上？通常 Go server 只在空地上画。
+                                // LuluGo 现有逻辑是 checks hasStone.
+                                const gtp = toGTP(x, y);
+                                const hasStone = currentStones.some(s => s[1] === gtp);
+                                if (!hasStone) {
+                                     board.addObject({
+                                         type: "FILL_SQ",
+                                         x: x, 
+                                         y: y,
+                                         c: val > 0 ? "rgba(0,0,0,0.7)" : "rgba(255,255,255,0.7)" 
+                                     });
+                                }
+                            }
+                        }
+                    }
+                }
+
+            } catch (e) {
+                console.error("Render Error:", e);
+            }
+        }
+
+        // 鼠标移动监听：显示己方颜色的虚影
+        board.addEventListener("mousemove", (x, y) => {
+            // 如果不是玩家，或者游戏还没开始，不显示
+            if (!myColor) return; 
+
+            // 检查边界
+            if (x < 0 || y < 0 || x >= 19 || y >= 19) return;
+
+            // 如果该位置已经是待确认的位置，不需要显示虚影
+            if (pendingCoord && pendingCoord.x === x && pendingCoord.y === y) {
+                if(ghostStone) { board.removeObject(ghostStone); ghostStone=null; }
+                return;
+            }
+
+            // 检查该位置是否已有棋子
+            const gtp = toGTP(x, y);
+            const isOccupied = currentStones.some(s => s[1] === gtp);
+            
+            if (isOccupied) {
+                if (ghostStone) {
+                    board.removeObject(ghostStone);
+                    ghostStone = null;
+                }
+                return;
+            }
+
+            // 如果已经有虚影且位置没变，通过
+            if (ghostStone && ghostStone.x === x && ghostStone.y === y) return;
+
+            // 移除旧虚影
+            if (ghostStone) {
+                board.removeObject(ghostStone);
+            }
+
+            // 添加新虚影：永远显示自己的颜色 (myColor)
+            ghostStone = {
+                x: x, 
+                y: y, 
+                c: (myColor === 'B') ? WGo.B : WGo.W,
+                type: "outline"
+            };
+            board.addObject(ghostStone);
+        });
+
+        // 鼠标移出棋盘时清除虚影
+        board.element.addEventListener("mouseleave", () => {
+             if (ghostStone) {
+                board.removeObject(ghostStone);
+                ghostStone = null;
+            }
+        });
+
+        // 点击落子
+        board.addEventListener("click", (x, y) => {
+            // 旁观者不能落子
+            if (!myColor) return;
+            if (isSubmitting) return; // 防止重复提交
+
+            // 核心请求：如果不是你的回合，或者游戏不在进行中，直接忽略
+            const statusDiv = document.getElementById('status');
+            // 如果 turn-indicator 显示 wait，或者 status 显示 wait，则不许动
+            // 也可以依赖 game status 字段如果能全局拿到，这里先用 UI 状态简单判断
+            if (myColor !== nextTurn || (statusDiv && statusDiv.innerText.includes("等待"))) {
+                console.log("Not your turn or game waiting - click ignored");
+                return;
+            }
+
+            if (x < 0 || y < 0 || x >= 19 || y >= 19) return;
+            
+            const gtp = toGTP(x, y);
+             // 检查是否占用
+            if (currentStones.some(s => s[1] === gtp)) return;
+
+            // --- 确认落子机制 ---
+            
+            // 1. 如果点击的位置就是 pendingCoord，则是【确认落子】
+            if (pendingCoord && pendingCoord.gtp === gtp) {
+                console.log("Confirmed move:", gtp);
+                
+                // 乐观更新 (Optimistic Update): 立即在本地显示实心子，消除延迟感
+                isSubmitting = true;
+                currentStones.push([myColor, gtp]);
+                lastMove = gtp;
+                pendingCoord = null;
+                renderBoard(); // 立即渲染
+
+                socket.emit('make_move', {game_id: gameId, coord: gtp});
+                return; 
+            }
+
+            // 2. 如果点击了其他空位，则更新 pendingCoord 并重绘
+            //    (第一次点击，或者改变主意点击别处)
+            pendingCoord = {x, y, gtp};
+            renderBoard(); // 重绘会把 old pending 清掉，画上 new pending
+        });
+
+        function undo() {
+            socket.emit('undo_game', {game_id: gameId});
+        }
+
+        function resign() {
+            if (confirm("确定认输吗？")) {
+                socket.emit('resign_game', {game_id: gameId});
+            }
+        }
+
+        function estimateScore() {
+            // 如果已经显示，点击则关闭
+            if (showingEstimate) {
+                closeEstimate();
+                return;
+            }
+
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerText = "⏳ 正在AI形势判断...";
+            
+            socket.emit('estimate_score', {game_id: gameId}, (response) => {
+                if (response) {
+                    showingEstimate = true;
+                    estimateData = response;
+                    
+                    // Add close button to status if not exists
+                    statusDiv.innerHTML = `
+                        <span style="color:#d35400; font-weight:bold;">形势判断: ${response.score}</span> 
+                        <button onclick="closeEstimate()" style="padding:2px 8px; margin-left:10px; font-size:12px; vertical-align:middle; background:#7f8c8d;">关闭显示</button>
+                    `;
+                    
+                    renderBoard(); // Will draw SQ because showingEstimate is true
+                } else {
+                    statusDiv.innerText = "形势判断失败";
+                }
+            });
+        }
+
+        function closeEstimate() {
+            showingEstimate = false;
+            estimateData = null;
+            renderBoard();
+            // Restore status text (approximate)
+            const turnText = nextTurn === 'B' ? '黑棋下' : '白棋下';
+            document.getElementById('status').innerText = `手数: ${currentStones.length} | 上一步: ${lastMove || '无'}`;
+        }
+
+        function requestCount() {
+            if (!confirm("申请开始数目？\n如果对方同意，AI 将判定胜负并结束游戏。")) return;
+            console.log("Sending request_counting for game:", gameId);
+            socket.emit('request_counting', {game_id: gameId});
+            document.getElementById('status').innerText = "⏳ 已发送数目请求，等待对方确认...";
+        }
+
+        socket.on('counting_requested', () => {
+             console.log("Received counting_requested event. MyColor:", myColor);
+             
+             // Update status for everyone in the room
+             const statusDiv = document.getElementById('status');
+             statusDiv.innerText = "📣 对方请求点目，等待确认...";
+             statusDiv.style.color = "#e74c3c";
+             statusDiv.style.fontWeight = "bold";
+
+             // 只有当前玩家需要响应
+             if (myColor) {
+                 // Blink title to notify
+                 const originalTitle = document.title;
+                 let blink = setInterval(() => {
+                     document.title = document.title === "【请求点目】" ? "LuluGo - 对弈" : "【请求点目】";
+                 }, 1000);
+
+                 setTimeout(() => {
+                     clearInterval(blink);
+                     document.title = originalTitle;
+                     
+                     if (confirm("🤖 对方申请开始数目并结束游戏。\n\n您同意使用AI判定胜负吗？")) {
+                         socket.emit('accept_counting', {game_id: gameId});
+                     } else {
+                         // Optional: You could emit a 'reject_counting' event here and notify the other player
+                         statusDiv.innerText = "已忽略点目请求";
+                         statusDiv.style.color = "#bdc3c7";
+                     }
+                 }, 200);
+             }
+        });
+
+        function back() {
+            window.location.href = '/static/lobby.html';
+        }
+
+        function toGTP(x, y) {
+            const letters = "ABCDEFGHJKLMNOPQRST";
+            return letters[x] + (19 - y);
+        }
+
+        function fromGTP(coord) {
+            const letters = "ABCDEFGHJKLMNOPQRST";
+            const col = letters.indexOf(coord[0].toUpperCase());
+            const row = 19 - parseInt(coord.slice(1));
+            return {x: col, y: row};
+        }
+    </script>
+</body>
+</html>

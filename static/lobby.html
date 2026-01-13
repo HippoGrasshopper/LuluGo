@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LuluGo - 大厅</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .section {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        h2 { margin-bottom: 15px; color: #333; }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            margin: 5px;
+            transition: 0.2s;
+        }
+        .btn-create { background: #667eea; color: white; }
+        .btn-join { background: #48c774; color: white; }
+        .btn-view { background: #3273dc; color: white; }
+        .btn-logout { background: #f14668; color: white; }
+        button:hover { transform: scale(1.05); }
+        
+        .game-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .game-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .game-item:last-child { border-bottom: none; }
+        .game-info { flex: 1; }
+        .game-info strong { color: #667eea; }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+            min-width: 300px;
+        }
+        .modal button { margin: 10px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌸 LuluGo 对弈大厅</h1>
+        <p>欢迎，<strong id="username"></strong>！ 
+            <button class="btn-logout" onclick="logout()">退出</button>
+        </p>
+    </div>
+
+    <div class="container">
+        <div class="section">
+            <button class="btn-create" onclick="showCreateModal()">+ 创建对局</button>
+        </div>
+
+        <div class="section">
+            <h2>⏳ 等待中的对局</h2>
+            <div class="game-list" id="waiting-list"></div>
+        </div>
+
+        <div class="section">
+            <h2>⚔️ 进行中的对局</h2>
+            <div class="game-list" id="playing-list"></div>
+        </div>
+
+        <div class="section">
+            <h2>📜 历史记录</h2>
+            <div class="game-list" id="history-list"></div>
+        </div>
+    </div>
+
+    <!-- 创建对局弹窗 -->
+    <div class="modal" id="create-modal">
+        <div class="modal-content">
+            <h2>创建对局</h2>
+            <p>选择你的颜色：</p>
+            <button class="btn-create" style="background:#000;" onclick="createGame('B')">执黑先行</button>
+            <button class="btn-create" style="background:#ddd; color:#000;" onclick="createGame('W')">执白后手</button>
+            <button class="btn-create" style="background:#f1c40f;" onclick="createGame('?')">随机/猜先</button>
+            <br/><br/>
+            <button onclick="closeModal()">取消</button>
+        </div>
+    </div>
+
+    <script>
+        const userId = sessionStorage.getItem('user_id');
+        const username = sessionStorage.getItem('username');
+
+        if (!userId) {
+            window.location.href = '/static/login.html';
+        }
+
+        document.getElementById('username').innerText = username;
+
+        async function loadGames() {
+            // 并行请求三个接口，而不是串行等待
+            const [waitingRes, playingRes, historyRes] = await Promise.all([
+                fetch('/api/games/waiting'),
+                fetch('/api/games/playing'),
+                fetch('/api/games/history')
+            ]);
+            
+            const [waiting, playing, history] = await Promise.all([
+                waitingRes.json(),
+                playingRes.json(),
+                historyRes.json()
+            ]);
+
+            renderWaiting(waiting.games);
+            renderPlaying(playing.games);
+            renderHistory(history.games);
+        }
+
+        function renderWaiting(games) {
+            const list = document.getElementById('waiting-list');
+            if (games.length === 0) {
+                list.innerHTML = '<p style="color:#999; text-align:center;">暂无等待中的对局</p>';
+                return;
+            }
+            list.innerHTML = games.map(g => {
+                let joinText = "加入";
+                let needed = "";
+                if (g.black_id === null) needed = "(缺黑棋)";
+                else if (g.white_id === null) needed = "(缺白棋)";
+                
+                return `
+                <div class="game-item">
+                    <div class="game-info">
+                        <strong>#${g.id}</strong> | 黑: ${g.black} | 白: ${g.white} <span style="color:#e74c3c">${needed}</span>
+                    </div>
+                    <button class="btn-join" onclick="joinGame(${g.id})">${joinText}</button>
+                </div>
+            `}).join('');
+        }
+
+        function renderPlaying(games) {
+            const list = document.getElementById('playing-list');
+            if (games.length === 0) {
+                list.innerHTML = '<p style="color:#999; text-align:center;">暂无进行中的对局</p>';
+                return;
+            }
+            list.innerHTML = games.map(g => `
+                <div class="game-item">
+                    <div class="game-info">
+                        <strong>#${g.id}</strong> | 黑: ${g.black} | 白: ${g.white} | ${g.status}
+                    </div>
+                    <button class="btn-view" onclick="joinGame(${g.id})">进入</button>
+                </div>
+            `).join('');
+        }
+
+        function renderHistory(games) {
+            const list = document.getElementById('history-list');
+            if (games.length === 0) {
+                list.innerHTML = '<p style="color:#999; text-align:center;">暂无历史记录</p>';
+                return;
+            }
+            list.innerHTML = games.map(g => {
+                let r = g.result || '未完成';
+                if (r === 'B+Resign') r = '黑中盘胜 (白认输)';
+                if (r === 'W+Resign') r = '白中盘胜 (黑认输)';
+                return `
+                <div class="game-item">
+                    <div class="game-info">
+                        <strong>#${g.id}</strong> | 黑: ${g.black} | 白: ${g.white} | <span style="font-weight:bold; color:#f1c40f;">${r}</span>
+                    </div>
+                    <button class="btn-view" onclick="viewReplay(${g.id})">复盘</button>
+                </div>
+            `}).join('');
+        }
+
+        function showCreateModal() {
+            document.getElementById('create-modal').style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('create-modal').style.display = 'none';
+        }
+
+        async function createGame(color) {
+            const res = await fetch('/api/games/create', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({user_id: parseInt(userId), color})
+            });
+            const data = await res.json();
+            if (data.success) {
+                closeModal();
+                window.location.href = `/static/game.html?id=${data.game_id}`;
+            }
+        }
+
+        function joinGame(gameId) {
+            window.location.href = `/static/game.html?id=${gameId}`;
+        }
+
+        function viewReplay(gameId) {
+            window.location.href = `/static/replay.html?id=${gameId}`;
+        }
+
+        function logout() {
+            if(confirm("确定要退出登录吗？")) {
+                // 发送退出日志请求 (不阻塞)
+                const username = sessionStorage.getItem('username');
+                fetch('/api/logout', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username: username || "Unknown"})
+                });
+                
+                sessionStorage.clear();
+                window.location.href = '/static/login.html';
+            }
+        }
+
+        loadGames();
+        setInterval(loadGames, 3000); // 自动刷新
+    </script>
+</body>
+</html>

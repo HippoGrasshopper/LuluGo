@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LuluGo - 复盘</title>
+    <script src="wgo.min.js"></script>
+    <script src="socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #2c3e50;
+            color: white;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+        #status { padding: 10px; font-size: 1.2em; height: 30px;}
+        #board-container {
+            width: 90vw;
+            max-width: 500px;
+            aspect-ratio: 1 / 1;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        #winrate-container {
+             width: 90vw;
+             max-width: 500px;
+             height: 100px;
+             background: #34495e;
+             margin: 10px 0;
+             border-radius: 4px;
+             position: relative;
+        }
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px;
+            width: 90vw;
+            max-width: 500px;
+            justify-content: center;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            background: #3498db;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover { background: #2980b9; }
+        input[type="range"] {
+            flex: 1;
+        }
+        
+        .ai-controls {
+            display: none;
+            gap: 10px;
+            background: #2c3e50;
+            padding: 5px;
+            border: 1px solid #8e44ad;
+            border-radius: 8px;
+        }
+        .btn-ai { background: #8e44ad; }
+        .btn-ai:hover { background: #9b59b6; }
+        
+        .btn-top-back {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            padding: 8px 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            font-size: 0.9em;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <button class="btn-top-back" onclick="back()">⬅返回</button>
+
+    <div id="status">加载中...</div>
+    <div id="board-container"></div>
+    
+    <div id="winrate-container">
+        <canvas id="winrate-chart"></canvas>
+    </div>
+
+    <!-- 标准控制栏 -->
+    <div class="controls" id="normal-controls">
+        <button onclick="jumpTo(0)" id="btn-start">⏮</button>
+        <button onclick="step(-1)" id="btn-prev">◀</button>
+        <input type="range" id="slider" min="0" max="0" value="0" oninput="jumpTo(this.value)" />
+        <button onclick="step(1)" id="btn-next">▶</button>
+        <button onclick="jumpTo(allMoves.length)" id="btn-end">⏭</button>
+        
+        <button id="btn-exit-trial" onclick="exitTrial()" style="display:none; background:#e67e22;">退出试下</button>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const gameId = parseInt(urlParams.get('id'));
+
+        // --- Socket & AI Vars ---
+        const socket = io();
+        let winrateChart = null;
+        let chartLinePlugin = {
+             id: 'verticalLine',
+             afterDraw: (chart) => {
+                 if (chart.tooltip?._active?.length) return; 
+                 const ctx = chart.ctx;
+                 // Calculate X position based on current step
+                 const step = isTrialMode ? (trialStartStep + currentTrialStep) : currentStep;
+                 const x = chart.scales.x.getPixelForValue(step);
+                 
+                 ctx.save();
+                 ctx.beginPath();
+                 ctx.moveTo(x, chart.chartArea.top);
+                 ctx.lineTo(x, chart.chartArea.bottom);
+                 ctx.lineWidth = 2;
+                 ctx.strokeStyle = '#e74c3c'; // Red cursor
+                 ctx.stroke();
+                 ctx.restore();
+             }
+        };
+
+        // --- 数据结构 ---
+        let allMoves = [];
+        let currentStep = 0;
+        let isTrialMode = false;
+        let trialMoves = [];
+        let trialStartStep = 0;
+        let currentTrialStep = 0;
+
+        const board = new WGo.Board(document.getElementById('board-container'), {
+            width: 500,
+            size: 19,
+            background: "#DCB35C"
+        });
+
+
+
+
+
+        async function loadGame() {
+            const res = await fetch(`/api/games/${gameId}`);
+            const data = await res.json();
+            allMoves = data.moves;
+            
+            document.getElementById('slider').max = allMoves.length;
+           
+            if (restoreState()) {
+                console.log("State restored");
+            } else {
+                currentStep = allMoves.length;
+            }
+             
+            // Setup chart after we know how many moves
+            setupChart(allMoves.length);
+            
+            render();
+        }
+
+        // --- Winrate Chart ---
+        function setupChart(totalMoves) {
+             const ctx = document.getElementById('winrate-chart').getContext('2d');
+             // Fake winrate data
+             const labels = Array.from({length: totalMoves + 1}, (_, i) => i);
+             const data = labels.map(i => 50 + Math.sin(i * 0.1) * 30 + (Math.random() - 0.5) * 5); // Mock
+             
+             winrateChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: '黑棋胜率',
+                            data: data,
+                            borderColor: '#2c3e50',
+                            backgroundColor: 'rgba(0,0,0,0)',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            tension: 0.1,
+                            yAxisID: 'y'
+                        },
+                         {
+                            label: '白棋胜率',
+                            data: data.map(x => 100 - x),
+                            borderColor: '#ecf0f1',
+                            borderWidth: 1,
+                            borderDash: [5, 5],
+                            pointRadius: 0,
+                            tension: 0.1,
+                            yAxisID: 'y'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { min: 0, max: 100, ticks: { callback: v => v+'%' }, grid: { color: '#555' } },
+                        x: { grid: { display: false } }
+                    },
+                    onClick: (e) => {
+                        const points = winrateChart.getElementsAtEventForMode(e, 'nearest', { intersect: false }, true);
+                        if (points.length) {
+                             jumpTo(points[0].index);
+                             render();
+                        }
+                    }
+                },
+                plugins: [chartLinePlugin]
+            });
+        }
+
+        // --- Render Core ---
+        function render() {
+            saveState();
+            const game = new WGo.Game(19);
+            
+            // 1. Base Moves
+            const realLimit = isTrialMode ? trialStartStep : currentStep;
+            allMoves.slice(0, realLimit).forEach(m => playMoveGTP(game, m));
+
+            // 2. Trial Moves
+            if (isTrialMode) {
+                trialMoves.slice(0, currentTrialStep).forEach(m => game.play(m.x, m.y, m.c));
+            }
+
+            // Draw Board
+            board.removeAllObjects();
+            const position = game.getPosition();
+            for (let x = 0; x < 19; x++) {
+                for (let y = 0; y < 19; y++) {
+                    const c = position.get(x, y); 
+                    if (c) board.addObject({x, y, c});
+                }
+            }
+            
+            // Draw Last Move (Simplified)
+            let lastMoveObj = null;
+            
+            // Determine logical last move based on mode
+            if (isTrialMode) {
+                if (currentTrialStep > 0) {
+                    const m = trialMoves[currentTrialStep - 1];
+                    lastMoveObj = {x: m.x, y: m.y, c: m.c};
+                } else if (trialStartStep > 0) {
+                     const [lc, lcoord] = allMoves[trialStartStep - 1];
+                     if (lcoord && lcoord.toUpperCase() !== 'PASS') {
+                         const lp = fromGTP(lcoord);
+                         lastMoveObj = {x: lp.x, y: lp.y, c: lc==='B'?WGo.B:WGo.W};
+                     }
+                }
+            } else {
+                if (currentStep > 0) {
+                    const [lc, lcoord] = allMoves[currentStep - 1];
+                    if (lcoord && lcoord.toUpperCase() !== 'PASS') {
+                         const lp = fromGTP(lcoord);
+                         lastMoveObj = {x: lp.x, y: lp.y, c: lc==='B'?WGo.B:WGo.W};
+                    }
+                }
+            }
+
+            updateUI(game);
+            
+             // Toggle Chart Visibility
+            const chartContainer = document.getElementById('winrate-container');
+            if (isTrialMode || aiMode !== 'NONE') {
+                chartContainer.style.display = 'none';
+            } else {
+                chartContainer.style.display = 'block';
+                if (winrateChart) winrateChart.update();
+            }
+        }
+
+        function playMoveGTP(game, move) {
+            const [color, coord] = move;
+            if (coord.toUpperCase() === 'PASS') game.pass(color==='B' ? WGo.B : WGo.W);
+            else {
+                const pos = fromGTP(coord);
+                game.play(pos.x, pos.y, color==='B' ? WGo.B : WGo.W);
+            }
+        }
+
+        // --- UI Interactions ---
+        function updateUI(game) {
+            const statusDiv = document.getElementById('status');
+            const statusText = `第 ${isTrialMode?trialStartStep+currentTrialStep : currentStep} 手 Turn: ${game.turn === WGo.B ? 'Black' : 'White'}`;
+            
+            if (aiMode === 'NONE') {
+                 statusDiv.innerText = statusText + (isTrialMode ? " [试下]" : "");
+                 document.getElementById('slider').value = currentStep;
+                 document.getElementById('slider').disabled = isTrialMode;
+            } else if (aiMode === 'SELECTION') {
+                 statusDiv.innerText = "请选择绿色落点查看 AI 演化";
+                 document.getElementById('status').style.color = "#8e44ad";
+            } else if (aiMode === 'EVOLUTION') {
+                 statusDiv.innerText = "AI 10步 演化演示";
+                 document.getElementById('status').style.color = "#2ecc71";
+            } else {
+                 document.getElementById('status').style.color = "white";
+            }
+            
+            board.currentTurnColor = game.turn;
+        }
+
+        // --- Board Clicks ---
+        board.addEventListener("click", (x, y) => {
+            if (x < 0 || y < 0 || x >= 19 || y >= 19) return;
+            const gtp = toGTP(x, y);
+
+            // Normal Trial Logic
+            if (!isTrialMode) {
+                isTrialMode = true;
+                trialStartStep = currentStep;
+                trialMoves = [];
+                currentTrialStep = 0;
+                document.getElementById('btn-exit-trial').style.display = 'inline-block';
+            }
+            
+            trialMoves = trialMoves.slice(0, currentTrialStep);
+            trialMoves.push({x, y, c: board.currentTurnColor});
+            currentTrialStep++;
+            render();
+        });
+
+        // --- Standard Controls ---
+        function jumpTo(step) {
+             if (isTrialMode) return;
+             currentStep = parseInt(step);
+             render();
+        }
+        
+        function step(d) {
+             if (isTrialMode) {
+                 const n = currentTrialStep + d;
+                 if (n >= 0 && n <= trialMoves.length) {
+                     currentTrialStep = n;
+                     render();
+                 }
+             } else {
+                 const n = currentStep + d;
+                 if (n >= 0 && n <= allMoves.length) {
+                     currentStep = n;
+                     render();
+                 }
+             }
+        }
+        
+        function exitTrial() {
+            isTrialMode = false;
+            trialMoves = [];
+            document.getElementById('btn-exit-trial').style.display = 'none';
+            render();
+        }
+        
+        function back() { window.location.href = '/static/lobby.html'; }
+
+        // --- Utils ---
+        function fromGTP(vertex) {
+            vertex = vertex.toUpperCase();
+            let colChar = vertex[0];
+            let rowStr = vertex.slice(1);
+            if (colChar >= 'I') colChar = String.fromCharCode(colChar.charCodeAt(0) - 1);
+            let x = colChar.charCodeAt(0) - 'A'.charCodeAt(0);
+            let y = 19 - parseInt(rowStr);
+            return {x, y};
+        }
+        function toGTP(x, y) {
+            let colStr = "ABCDEFGHJKLMNOPQRST"[x];
+            let rowStr = (19 - y).toString();
+            return colStr + rowStr;
+        }
+
+        loadGame();
+        
+        function saveState() {
+             const s = {currentStep, isTrialMode, trialMoves, trialStartStep, currentTrialStep};
+             sessionStorage.setItem('replay_' + gameId, JSON.stringify(s));
+        }
+        function restoreState() {
+            const s = sessionStorage.getItem('replay_' + gameId);
+            if(s) {
+                 const o = JSON.parse(s);
+                 currentStep = o.currentStep; 
+                 isTrialMode = o.isTrialMode;
+                 trialMoves = o.trialMoves || [];
+                 trialStartStep = o.trialStartStep || 0;
+                 currentTrialStep = o.currentTrialStep || 0;
+                 return true;
+            }
+            return false;
+        }
+    </script>
+</body>
+</html>
