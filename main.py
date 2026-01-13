@@ -364,22 +364,54 @@ async def request_counting(sid, data):
 @sio.event
 async def accept_counting(sid, data):
     """接受点目，直接结算"""
-    game_id = data["game_id"]
+    game_id = data.get("game_id")
+    print(f"[Counting] 收到同意点目请求: game_id={game_id}, sid={sid}")
+    
     engine = active_games.get(game_id)
     
-    # 尝试从 DB 恢复 moves 如果内存里没有 (不应该，因为 playing 肯定在内存)
+    # 尝试从 DB 恢复 moves 如果内存里没有 (防止服务器重启后卡死)
     if not engine:
-        return
+        print(f"[Warning] Counting: Game {game_id} 内存丢失，尝试从数据库恢复...")
+        db_game = get_game(game_id)
+        if db_game:
+            # 恢复 Moves 列表供 AI 分析
+            moves = db_game.get_moves()
+            engine = GameEngine() 
+            engine.moves = moves
+            # 暂时放回 active_games 以防后续逻辑需要，但在 game_over 后会删除
+            active_games[game_id] = engine
+            print(f"[Recover] Game {game_id} 恢复成功 (moves={len(moves)})")
+        else:
+            print(f"[Error] Game {game_id} 数据库中不存在")
+            # 也要通知前端因为无法处理
+            return
         
     import asyncio
-    # 使用 AI 进行终局数子
-    result = await asyncio.to_thread(ai_engine.analyze, engine.moves, max_visits=800)
-    score = result["lead"]
+    print(f"[Counting] 开始 AI 终局计算 (moves={len(engine.moves)})...")
+    
+    try:
+        # ai_engine.analyze returns { "rootInfo": { "scoreLead": ... }, ... }
+        ai_result = await asyncio.to_thread(ai_engine.analyze, engine.moves, max_visits=800)
+        print(f"[Counting] AI 计算完成")
+    except Exception as e:
+        print(f"[Error] AI analyze failed: {e}")
+        return
+
+    # Handle the structure returned by MockKataGoWrapper
+    if "rootInfo" in ai_result and "scoreLead" in ai_result["rootInfo"]:
+        score = ai_result["rootInfo"]["scoreLead"]
+    elif "lead" in ai_result:
+        score = ai_result["lead"] # Fallback if using old AI
+    else:
+        score = 0.0 # Default fallback
+        print(f"[Warning] 无法解析比分，默认 0.0. AI Result keys: {ai_result.keys()}")
+        
     winner = 'B' if score > 0 else 'W'
     res_str = f"{winner}+{abs(score):.1f}"
     
     # 更新数据库结束游戏
     update_game(game_id, status="ENDED", winner=winner, result_detail=res_str)
+    print(f"[Counting] 游戏结束: {res_str}")
     
     await sio.emit("game_over", {
         "winner": winner,

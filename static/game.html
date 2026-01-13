@@ -268,8 +268,17 @@
 
         socket.on('game_over', (data) => {
             let resultText = data.result;
-            if (data.result === 'B+Resign') resultText = "黑方胜 (白认输)";
-            if (data.result === 'W+Resign') resultText = "白方胜 (黑认输)";
+            
+            // Format Result Text
+            if (resultText === 'B+Resign') {
+                resultText = "黑方中盘胜 (白认输)";
+            } else if (resultText === 'W+Resign') {
+                resultText = "白方中盘胜 (黑认输)";
+            } else if (resultText && resultText.startsWith('B+')) {
+                resultText = `黑胜 ${resultText.substring(2)} 目`;
+            } else if (resultText && resultText.startsWith('W+')) {
+                resultText = `白胜 ${resultText.substring(2)} 目`;
+            }
             
             // 1. Show Game Over Modal
             document.getElementById('game-over-reason').innerText = data.reason || "对局结束";

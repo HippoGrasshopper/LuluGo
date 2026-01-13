@@ -197,8 +197,18 @@
             }
             list.innerHTML = games.map(g => {
                 let r = g.result || '未完成';
-                if (r === 'B+Resign') r = '黑中盘胜 (白认输)';
-                if (r === 'W+Resign') r = '白中盘胜 (黑认输)';
+                
+                // Format Result Text
+                if (r === 'B+Resign') {
+                    r = '黑中盘胜';
+                } else if (r === 'W+Resign') {
+                    r = '白中盘胜';
+                } else if (r.startsWith('B+')) {
+                    r = `黑胜 ${r.substring(2)} 目`;
+                } else if (r.startsWith('W+')) {
+                    r = `白胜 ${r.substring(2)} 目`;
+                }
+                
                 return `
                 <div class="game-item">
                     <div class="game-info">

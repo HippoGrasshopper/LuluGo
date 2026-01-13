@@ -83,7 +83,12 @@
 <body>
     <button class="btn-top-back" onclick="back()">⬅返回</button>
 
-    <div id="status">加载中...</div>
+    <div id="game-info" style="display:flex; justify-content:space-around; align-items:center; width:100%; max-width:600px; padding:10px; background:#34495e; margin: 10px 0; border-radius:8px;">
+        <div id="black-player" style="flex:1; text-align:center; font-size: 0.9em;">⚫ ???</div>
+        <div id="status" style="width:150px; text-align:center; font-weight:bold; color:#f1c40f; margin:0 10px; font-size: 1.1em;">加载中</div>
+        <div id="white-player" style="flex:1; text-align:center; font-size: 0.9em;">⚪ ???</div>
+    </div>
+
     <div id="board-container"></div>
     
     <div id="winrate-container">
@@ -166,6 +171,10 @@
             const res = await fetch(`/api/games/${gameId}`);
             const data = await res.json();
             allMoves = data.moves;
+            
+            // Set Player Names
+            document.getElementById('black-player').innerText = "⚫ " + (data.black || "???");
+            document.getElementById('white-player').innerText = "⚪ " + (data.white || "???");
             
             document.getElementById('slider').max = allMoves.length;
            
@@ -344,20 +353,32 @@
         // --- UI Interactions ---
         function updateUI(game) {
             const statusDiv = document.getElementById('status');
+            const slider = document.getElementById('slider');
+            const exitBtn = document.getElementById('btn-exit-trial');
             
-            // If estimating, don't overwrite status
+            // 1. Status Text
             if (showingEstimate) {
-                 if (estimateData) 
-                    statusDiv.innerHTML = `<span style="color:#d35400;">形势判断: ${estimateData.score}</span> (点击形势判断按钮关闭)`;
-                 return;
+                 statusDiv.innerText = "形势判断";
+                 statusDiv.style.color = "#d35400";
+            } else if (isTrialMode) {
+                 statusDiv.innerText = "试下中";
+                 statusDiv.style.color = "#e67e22";
+            } else {
+                 statusDiv.innerText = `第 ${currentStep} 手`;
+                 statusDiv.style.color = "#f1c40f";
             }
             
-            const statusText = `第 ${isTrialMode?trialStartStep+currentTrialStep : currentStep} 手 Turn: ${game.turn === WGo.B ? 'Black' : 'White'}`;
-            
-            statusDiv.innerText = statusText + (isTrialMode ? " [试下]" : "");
-            document.getElementById('slider').value = currentStep;
-            document.getElementById('slider').disabled = isTrialMode;
-            document.getElementById('status').style.color = "white";
+            // 2. Controls Visibility
+            // If in trial mode, hide progress bar but keep buttons
+            if (isTrialMode) {
+                slider.style.visibility = 'hidden'; 
+                if(exitBtn) exitBtn.style.display = 'inline-block';
+            } else {
+                slider.style.visibility = 'visible';
+                slider.value = currentStep;
+                slider.disabled = showingEstimate;
+                if(exitBtn) exitBtn.style.display = 'none';
+            }
             
             board.currentTurnColor = game.turn;
         }
@@ -396,9 +417,6 @@
                     sessionStorage.setItem('isEstimating', 'true');
                     sessionStorage.setItem('gameId', gameId);
                     
-                    document.getElementById('status').innerHTML = 
-                        `<span style="color:#d35400;">形势判断: ${response.score}</span> (点击按钮关闭)`;
-                    
                     render();
                 } else {
                     alert("形势判断失败");
@@ -412,9 +430,6 @@
             sessionStorage.removeItem('estimationData');
             sessionStorage.removeItem('isEstimating');
             render();
-            // Restore status
-            const t = isTrialMode ? trialStartStep+currentTrialStep : currentStep;
-            document.getElementById('status').innerText = `第 ${t} 手`;
         }
 
         // --- Board Clicks ---
