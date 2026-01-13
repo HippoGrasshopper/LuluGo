@@ -99,6 +99,7 @@
         <button onclick="jumpTo(allMoves.length)" id="btn-end">⏭</button>
         
         <button id="btn-exit-trial" onclick="exitTrial()" style="display:none; background:#e67e22;">退出试下</button>
+        <button onclick="estimateScore()" style="background:#8e44ad; margin-left:10px;">形势判断</button>
     </div>
 
     <script>
@@ -108,6 +109,21 @@
         // --- Socket & AI Vars ---
         const socket = io();
         let winrateChart = null;
+        
+        // --- Estimation Vars (Persistence) ---
+        let showingEstimate = false;
+        let estimateData = null;
+         // Recover from session
+        if (sessionStorage.getItem('isEstimating') === 'true' && 
+            parseInt(sessionStorage.getItem('gameId')) === gameId) {
+             try {
+                estimateData = JSON.parse(sessionStorage.getItem('estimationData'));
+                showingEstimate = true;
+             } catch(e) {
+                console.error("Failed to recover estimation data", e);
+                sessionStorage.removeItem('isEstimating');
+             }
+        }
         let chartLinePlugin = {
              id: 'verticalLine',
              afterDraw: (chart) => {
@@ -270,13 +286,38 @@
             }
 
             // Draw Last Move Marker
-            if (lastMoveObj) {
+            if (lastMoveObj && !showingEstimate) {
                 board.addObject({
                     type: "CR",
                     x: lastMoveObj.x,
                     y: lastMoveObj.y,
                     c: lastMoveObj.c === WGo.B ? "white" : "black"
                 });
+            }
+            
+            // Draw Estimation (Solid Squares)
+            if (showingEstimate && estimateData && estimateData.ownership) {
+
+                const position = game.getPosition(); // Current board state
+                
+                // 透明度设置：1.0 为完全不透明（实心），0.0 为全透明
+                const opacity = 0.9;
+                
+                // Use y then x convention for ownership matrix
+                for(let y=0; y<19; y++) {
+                    for(let x=0; x<19; x++) {
+                        const val = estimateData.ownership[y][x]; 
+                        if (Math.abs(val) > 0.5) { 
+                             // Draw everywhere (dead stones will be covered)
+                             board.addObject({
+                                 type: "SL",
+                                 x: x, 
+                                 y: y,
+                                 c: val > 0 ? `rgba(0,0,0,${opacity})` : `rgba(255,255,255,${opacity})` 
+                             });
+                        }
+                    }
+                }
             }
 
             updateUI(game);
@@ -303,6 +344,14 @@
         // --- UI Interactions ---
         function updateUI(game) {
             const statusDiv = document.getElementById('status');
+            
+            // If estimating, don't overwrite status
+            if (showingEstimate) {
+                 if (estimateData) 
+                    statusDiv.innerHTML = `<span style="color:#d35400;">形势判断: ${estimateData.score}</span> (点击形势判断按钮关闭)`;
+                 return;
+            }
+            
             const statusText = `第 ${isTrialMode?trialStartStep+currentTrialStep : currentStep} 手 Turn: ${game.turn === WGo.B ? 'Black' : 'White'}`;
             
             statusDiv.innerText = statusText + (isTrialMode ? " [试下]" : "");
@@ -312,9 +361,70 @@
             
             board.currentTurnColor = game.turn;
         }
+        
+        // --- Estimation Logic ---
+        function estimateScore() {
+            if (showingEstimate) {
+                closeEstimate();
+                return;
+            }
+            
+            const btn = event.target; // Simple hack to get button
+            const originText = btn.innerText;
+            btn.innerText = "计算中...";
+
+            // Construct moves list based on current state (including trial moves)
+            const limit = isTrialMode ? trialStartStep : currentStep;
+            let moves = allMoves.slice(0, limit);
+            
+            if (isTrialMode && trialMoves.length > 0) {
+                 // Must convert trialMoves [{x,y,c}] to ["B", "Q16"] format
+                 const extraMoves = trialMoves.slice(0, currentTrialStep).map(m => {
+                     return [m.c === WGo.B ? "B" : "W", toGTP(m.x, m.y)];
+                 });
+                 moves = moves.concat(extraMoves);
+            }
+            
+            socket.emit('estimate_score', {moves: moves}, (response) => {
+                btn.innerText = originText; // Restore button text
+                if (response && response.ownership) {
+                    showingEstimate = true;
+                    estimateData = response;
+                    
+                    // Persistence
+                    sessionStorage.setItem('estimationData', JSON.stringify(response));
+                    sessionStorage.setItem('isEstimating', 'true');
+                    sessionStorage.setItem('gameId', gameId);
+                    
+                    document.getElementById('status').innerHTML = 
+                        `<span style="color:#d35400;">形势判断: ${response.score}</span> (点击按钮关闭)`;
+                    
+                    render();
+                } else {
+                    alert("形势判断失败");
+                }
+            });
+        }
+        
+        function closeEstimate() {
+            showingEstimate = false;
+            estimateData = null;
+            sessionStorage.removeItem('estimationData');
+            sessionStorage.removeItem('isEstimating');
+            render();
+            // Restore status
+            const t = isTrialMode ? trialStartStep+currentTrialStep : currentStep;
+            document.getElementById('status').innerText = `第 ${t} 手`;
+        }
 
         // --- Board Clicks ---
         board.addEventListener("click", (x, y) => {
+            // 如果处于形势判断模式，必须先关闭
+            if (showingEstimate) {
+                 alert("请先关闭形势判断功能");
+                 return;
+            }
+
             if (x < 0 || y < 0 || x >= 19 || y >= 19) return;
             const gtp = toGTP(x, y);
 
@@ -335,12 +445,14 @@
 
         // --- Standard Controls ---
         function jumpTo(step) {
+             if (showingEstimate) { alert("请先关闭形势判断"); return; }
              if (isTrialMode) return;
              currentStep = parseInt(step);
              render();
         }
         
         function step(d) {
+             if (showingEstimate) { alert("请先关闭形势判断"); return; }
              if (isTrialMode) {
                  const n = currentTrialStep + d;
                  if (n >= 0 && n <= trialMoves.length) {

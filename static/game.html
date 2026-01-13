@@ -51,10 +51,67 @@
             z-index: 100;
         }
         .btn-top-back:hover { background: rgba(255, 255, 255, 0.2); }
+        
+        /* Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: #2c3e50;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            border: 2px solid #f1c40f;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            max-width: 80%;
+            color: white;
+        }
     </style>
 </head>
 <body>
     <button class="btn-top-back" onclick="back()">⬅ 大厅</button>
+
+    <!-- Modal for Counting Request -->
+    <div id="counting-modal" class="modal-overlay">
+        <div class="modal-content">
+            <h3 style="margin-top:0;">🏁 对方请求点目</h3>
+            <p>对方申请结束游戏并进行点目。<br>是否同意？</p>
+            <div style="margin-top:20px; display:flex; gap:10px; justify-content:center;">
+                <button onclick="confirmAcceptCounting()" style="background:#2ecc71;">同意</button>
+                <button onclick="confirmRejectCounting()" style="background:#e74c3c;">拒绝</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for Resign Confirmation -->
+    <div id="resign-modal" class="modal-overlay">
+        <div class="modal-content">
+            <h3 style="margin-top:0; color:#e74c3c;">🏳️ 认输确认</h3>
+            <p>确定要认输吗？<br>对局将立即结束。</p>
+            <div style="margin-top:20px; display:flex; gap:10px; justify-content:center;">
+                <button onclick="confirmResign()" style="background:#e74c3c;">确认认输</button>
+                <button onclick="closeResignModal()" style="background:#7f8c8d;">取消</button>
+            </div>
+        </div>
+    </div>
+    <!-- Modal for Game Over -->
+    <div id="game-over-modal" class="modal-overlay">
+        <div class="modal-content">
+            <h3 style="margin-top:0; color: #f1c40f;">🏆 游戏结束</h3>
+            <p id="game-over-reason" style="margin: 10px 0; color: #bdc3c7;"></p>
+            <h2 id="game-over-result" style="margin: 20px 0; font-size: 2em; color: white;"></h2>
+            <div style="margin-top:20px; display:flex; gap:10px; justify-content:center;">
+                <button onclick="closeGameOverModal()" style="background:#3498db; flex: 1; padding: 12px; font-size: 1.1em;">查看棋局</button>
+                <button onclick="back()" style="background:#8e44ad; flex: 1; padding: 12px; font-size: 1.1em;">返回大厅</button>
+            </div>
+        </div>
+    </div>
 
     <div id="game-info" style="display:flex; justify-content:space-around; width:100%; max-width:600px; padding:10px; background:#34495e; margin: 50px 0 10px 0; border-radius:8px;">
         <div id="black-player">⚫ 黑方: ???</div>
@@ -86,6 +143,22 @@
         let pendingCoord = null; // 待确认的坐标 {x, y, gtp}
 
         let isSubmitting = false;
+        
+        // --- Persistence Recovery ---
+        let showingEstimate = false;
+        let estimateData = null;
+        
+        // Check if we were estimating before refresh
+        if (sessionStorage.getItem('isEstimating') === 'true' && 
+            parseInt(sessionStorage.getItem('gameId')) === gameId) {
+             try {
+                estimateData = JSON.parse(sessionStorage.getItem('estimationData'));
+                showingEstimate = true;
+             } catch(e) {
+                console.error("Failed to recover estimation data", e);
+                sessionStorage.removeItem('isEstimating');
+             }
+        }
 
         const board = new WGo.Board(document.getElementById('board-container'), {
             width: 600,
@@ -94,24 +167,8 @@
         });
 
         // Register custom draw handler for Solid Square (Ownership)
-        WGo.Board.drawHandlers.FILL_SQ = {
-            draw: function(args, board) {
-                var xr = board.getX(args.x),
-                    yr = board.getY(args.y),
-                    sr = board.stoneRadius * 0.8; // Slightly smaller than full stone
-                
-                var ctx = board.getContext();
-                ctx.save();
-                ctx.fillStyle = args.c || "rgba(0,0,0,0.5)";
-                ctx.beginPath();
-                ctx.rect(xr - sr, yr - sr, 2*sr, 2*sr);
-                ctx.fill();
-                ctx.restore();
-            }
-        };
+        // Use a unique type name 'M_SQ' (Mock/My Square) to avoid conflicts with WGo internals
 
-        let showingEstimate = false;
-        let estimateData = null;
 
         socket.on('connect', () => {
             socket.emit('auth', {user_id: userId});
@@ -120,6 +177,13 @@
 
         socket.on('board_update', (data) => {
             console.log("Board Update:", data);
+            
+            // 如果对方落子，且我正在看形势判断 -> 强制关闭
+            if (showingEstimate) {
+                 console.log("Board updated, closing estimate.");
+                 closeEstimate();
+            }
+
             isSubmitting = false; // 服务器返回了，解除锁定，如果之前是乐观更新，现在会被权威状态覆盖
             currentStones = data.moves;
             nextTurn = data.turn;
@@ -149,13 +213,32 @@
             
             if (data.status === "WAITING") {
                 ind.innerText = "等待开始...";
-                ind.style.backgroundColor = "#7f8c8d";
+                ind.style.backgroundColor = "transparent";
                 ind.style.color = "white";
                 statusDiv.innerText = "等待对手加入...";
+            } else if (data.status === "ENDED") {
+                 ind.innerText = "游戏对局结束";
+                 ind.style.backgroundColor = "transparent";
+                 ind.style.color = "white";
+                 statusDiv.innerText = "已结束";
+                 
+                 // 如果游戏已结束，确保底部按钮是“返回大厅”
+                 showBackToLobbyButton();
             } else {
-                ind.innerText = `Current: ${turnText}`;
-                ind.style.backgroundColor = nextTurn === 'B' ? 'black' : 'white'; 
-                ind.style.color = nextTurn === 'B' ? 'white' : 'black';
+                ind.innerText = `Turn: ${turnText}`;
+                
+                // Consistent High Contrast Style
+                if (nextTurn === 'B') {
+                    ind.style.backgroundColor = "black";
+                    ind.style.color = "white";
+                    ind.style.border = "1px solid #444";
+                    ind.style.textShadow = "none";
+                } else {
+                    ind.style.backgroundColor = "white";
+                    ind.style.color = "black";
+                    ind.style.border = "1px solid #ccc";
+                    ind.style.textShadow = "none";
+                }
                 statusDiv.innerText = `手数: ${currentStones.length} | 上一步: ${lastMove || '无'}`;
             }
             
@@ -184,22 +267,48 @@
         });
 
         socket.on('game_over', (data) => {
-            let msg = `游戏结束！${data.result}`;
-            if (data.result === 'B+Resign') msg = "游戏结束！黑棋中盘胜 (白认输)";
-            if (data.result === 'W+Resign') msg = "游戏结束！白棋中盘胜 (黑认输)";
+            let resultText = data.result;
+            if (data.result === 'B+Resign') resultText = "黑方胜 (白认输)";
+            if (data.result === 'W+Resign') resultText = "白方胜 (黑认输)";
+            
+            // 1. Show Game Over Modal
+            document.getElementById('game-over-reason').innerText = data.reason || "对局结束";
+            document.getElementById('game-over-result').innerText = resultText;
+            document.getElementById('game-over-modal').style.display = 'flex';
 
-            alert(msg);
+            // 2. Hide Counting Modal if open
+            closeCountingModal();
             
-            // 禁用按钮，锁定棋盘（虽然服务端已经不接受move了，但前端也可以封住）
-            document.querySelector('.btn-undo').disabled = true;
-            document.querySelector('.btn-resign').disabled = true;
-            document.querySelector('.btn-group').innerHTML = 
-                `<button class="btn-back" onclick="back()" style="flex:1; background:#8e44ad; font-weight:bold;">返回大厅</button>`;
+            // 3. Update UI Controls (Disable game buttons, show Back button)
+            showBackToLobbyButton();
             
-            // 状态栏更新
+            // 4. Update Status Bar
             document.getElementById('turn-indicator').innerText = "游戏对局结束";
-            document.getElementById('status').innerText = msg;
+            document.getElementById('status').innerText = `结果: ${resultText}`;
         });
+
+        function closeGameOverModal() {
+            document.getElementById('game-over-modal').style.display = 'none';
+        }
+
+        function showBackToLobbyButton() {
+            const btnGroup = document.querySelector('.btn-group');
+            if (btnGroup) {
+                // Clear existing buttons
+                btnGroup.innerHTML = '';
+                // Add Back button
+                const backBtn = document.createElement('button');
+                backBtn.className = 'btn-count'; 
+                backBtn.innerText = '返回大厅';
+                backBtn.onclick = back;
+                backBtn.style.flex = '1';
+                backBtn.style.background = '#8e44ad'; // Purple
+                backBtn.style.fontWeight = 'bold';
+                backBtn.style.fontSize = '16px';
+                btnGroup.appendChild(backBtn);
+                btnGroup.style.display = 'flex';
+            }
+        }
 
         socket.on('error', (data) => {
             if (isSubmitting) {
@@ -253,23 +362,26 @@
 
                 // 绘制形势判断 (Solid Squares)
                 if (showingEstimate && estimateData && estimateData.ownership) {
-                    for(let x=0; x<19; x++) {
-                        for(let y=0; y<19; y++) {
-                            const val = estimateData.ownership[x][y]; 
+                    // 由于 ownership 矩阵是 row(y) col(x) 还是 col(x) row(y)?
+                    // Python: ownership[row][col] -> ownership[y][x]
+                    // 通常 AI 返回的是 19行，每行19列。
+                    // 所以 estimateData.ownership[0] 是第一行 (y=19 in GTP, y=0 in WGo)
+                    // WGo 坐标: (0,0) 是左上角 (A19)
+                    
+                    // 透明度设置：1.0 为完全不透明（实心），0.0 为全透明。0.5 是半透明。
+                    const opacity = 0.9;
+                    
+                    for(let y=0; y<19; y++) {
+                        for(let x=0; x<19; x++) {
+                            const val = estimateData.ownership[y][x]; 
                             if (Math.abs(val) > 0.5) { 
-                                // 检查是否已有棋子 -> 如果有棋子，通常 ownership 也是确定的，
-                                // 用户可能希望看到实地覆盖在棋子上？通常 Go server 只在空地上画。
-                                // LuluGo 现有逻辑是 checks hasStone.
-                                const gtp = toGTP(x, y);
-                                const hasStone = currentStones.some(s => s[1] === gtp);
-                                if (!hasStone) {
-                                     board.addObject({
-                                         type: "FILL_SQ",
-                                         x: x, 
-                                         y: y,
-                                         c: val > 0 ? "rgba(0,0,0,0.7)" : "rgba(255,255,255,0.7)" 
-                                     });
-                                }
+                                // 现在不检查是否有棋子，直接覆盖显示
+                                board.addObject({
+                                    type: "SL",
+                                    x: x, 
+                                    y: y,
+                                    c: val > 0 ? `rgba(0, 0, 0, ${opacity})` : `rgba(255, 255, 255, ${opacity})`
+                                });
                             }
                         }
                     }
@@ -334,6 +446,14 @@
 
         // 点击落子
         board.addEventListener("click", (x, y) => {
+            // A. 形势判断模式下：
+            if (showingEstimate) {
+                 // 只响应关闭操作？不，通常点击棋盘应该关闭形势并尝试落子，或者直接 return
+                 // 按照需求：只有自己关闭形势判断后才能继续行棋
+                 alert("请先关闭形势判断 (点击按钮或上方关闭) 再进行落子");
+                 return;
+            }
+
             // 旁观者不能落子
             if (!myColor) return;
             if (isSubmitting) return; // 防止重复提交
@@ -381,9 +501,17 @@
         }
 
         function resign() {
-            if (confirm("确定认输吗？")) {
-                socket.emit('resign_game', {game_id: gameId});
-            }
+            // Show custom modal instead of confirm()
+            document.getElementById('resign-modal').style.display = 'flex';
+        }
+
+        function confirmResign() {
+            closeResignModal();
+            socket.emit('resign_game', {game_id: gameId});
+        }
+
+        function closeResignModal() {
+            document.getElementById('resign-modal').style.display = 'none';
         }
 
         function estimateScore() {
@@ -401,9 +529,24 @@
                     showingEstimate = true;
                     estimateData = response;
                     
+                    // Local Storage Persistence
+                    sessionStorage.setItem('estimationData', JSON.stringify(response));
+                    sessionStorage.setItem('isEstimating', 'true');
+                    sessionStorage.setItem('gameId', gameId);
+
                     // Add close button to status if not exists
+                    // response 是从 ai.py 返回的 {rootInfo: {scoreLead...}, ownership...}
+                    // 先处理数据格式
+                    let lead = 0;
+                    if (response.rootInfo && response.rootInfo.scoreLead !== undefined) {
+                         lead = response.rootInfo.scoreLead;
+                    } else if (response.lead !== undefined) {
+                         lead = response.lead; // Fallback
+                    }
+                    const leadText = (lead > 0 ? "黑+" : "白+") + Math.abs(lead).toFixed(1);
+
                     statusDiv.innerHTML = `
-                        <span style="color:#d35400; font-weight:bold;">形势判断: ${response.score}</span> 
+                        <span style="color:#d35400; font-weight:bold;">形势判断: ${leadText}</span> 
                         <button onclick="closeEstimate()" style="padding:2px 8px; margin-left:10px; font-size:12px; vertical-align:middle; background:#7f8c8d;">关闭显示</button>
                     `;
                     
@@ -417,10 +560,11 @@
         function closeEstimate() {
             showingEstimate = false;
             estimateData = null;
+            sessionStorage.removeItem('estimationData'); // Clear cache
+            sessionStorage.removeItem('isEstimating');
             renderBoard();
             // Restore status text (approximate)
-            const turnText = nextTurn === 'B' ? '黑棋下' : '白棋下';
-            document.getElementById('status').innerText = `手数: ${currentStones.length} | 上一步: ${lastMove || '无'}`;
+            updateStatus();
         }
 
         function requestCount() {
@@ -446,22 +590,62 @@
                  let blink = setInterval(() => {
                      document.title = document.title === "【请求点目】" ? "LuluGo - 对弈" : "【请求点目】";
                  }, 1000);
-
-                 setTimeout(() => {
-                     clearInterval(blink);
-                     document.title = originalTitle;
-                     
-                     if (confirm("🤖 对方申请开始数目并结束游戏。\n\n您同意使用AI判定胜负吗？")) {
-                         socket.emit('accept_counting', {game_id: gameId});
-                     } else {
-                         // Optional: You could emit a 'reject_counting' event here and notify the other player
-                         statusDiv.innerText = "已忽略点目请求";
-                         statusDiv.style.color = "#bdc3c7";
-                     }
-                 }, 200);
+                 
+                 // Show custom modal instead of system confirm
+                 // This is non-blocking and more visible
+                 const modal = document.getElementById('counting-modal');
+                 modal.style.display = 'flex';
+                 
+                 // Store interval id to clear later
+                 window.countingBlinkId = blink;
+                 window.originalTitle = originalTitle;
              }
         });
 
+        function confirmAcceptCounting() {
+             closeCountingModal();
+             socket.emit('accept_counting', {game_id: gameId});
+        }
+
+        function confirmRejectCounting() {
+             closeCountingModal();
+             // Optional: emit rejection
+             const statusDiv = document.getElementById('status');
+             statusDiv.innerText = "已拒绝点目请求";
+             statusDiv.style.color = "#bdc3c7";
+             updateStatus(); // Restore normal status text
+        }
+
+        function closeCountingModal() {
+             document.getElementById('counting-modal').style.display = 'none';
+             if (window.countingBlinkId) {
+                 clearInterval(window.countingBlinkId);
+                 document.title = window.originalTitle;
+                 window.countingBlinkId = null;
+             }
+        }
+
+        function updateStatus() {
+            const ind = document.getElementById('turn-indicator');
+            const turnText = nextTurn === 'B' ? '黑棋下' : '白棋下';
+            ind.innerText = `Turn: ${turnText}` + (pendingCoord ? " (等待确认)" : "");
+            
+            // Re-apply correct color logic (Consistent High Contrast)
+            if (nextTurn === 'B') {
+                ind.style.backgroundColor = "black";
+                ind.style.color = pendingCoord ? "#e74c3c" : "white";
+                ind.style.border = "1px solid #444";
+                ind.style.textShadow = "none";
+            } else {
+                ind.style.backgroundColor = "white";
+                ind.style.color = pendingCoord ? "#e74c3c" : "black";
+                ind.style.border = "1px solid #ccc";
+                ind.style.textShadow = "none";
+            }
+
+            document.getElementById('status').innerText = `手数: ${currentStones.length} | 上一步: ${lastMove || '无'}`;
+        }
+        
         function back() {
             window.location.href = '/static/lobby.html';
         }
