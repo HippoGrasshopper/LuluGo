@@ -22,7 +22,8 @@ class Game(SQLModel, table=True):
     
     current_turn: str = Field(default="B")  # 'B' or 'W'
     moves_json: str = Field(default="[]")   # JSON string of moves
-    
+    ai_winrates_json: str = Field(default="[]") # JSON string of AI winrates per move
+
     winner: Optional[str] = None  # 'B', 'W', 'Draw'
     result_detail: Optional[str] = None  # "B+Resign", "W+3.5"
     
@@ -36,6 +37,15 @@ class Game(SQLModel, table=True):
     def set_moves(self, moves):
         self.moves_json = json.dumps(moves)
     
+    def get_ai_winrates(self):
+        try:
+            return json.loads(self.ai_winrates_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def set_ai_winrates(self, winrates):
+        self.ai_winrates_json = json.dumps(winrates)
+
     def get_black_username(self, session):
         if self.black_player_id:
             user = session.get(User, self.black_player_id)

@@ -125,7 +125,7 @@
     <div class="btn-group">
         <button class="btn-undo" onclick="undo()">悔棋</button>
         <button class="btn-resign" onclick="resign()">认输</button>
-        <button class="btn-ai" onclick="estimateScore()">形势判断</button>
+        <button id="btn-estimate" class="btn-ai" onclick="estimateScore()">形势判断</button>
         <button class="btn-count" onclick="requestCount()">开始数目</button>
     </div>
 
@@ -383,7 +383,7 @@
                     for(let y=0; y<19; y++) {
                         for(let x=0; x<19; x++) {
                             const val = estimateData.ownership[y][x]; 
-                            if (Math.abs(val) > 0.5) { 
+                            if (Math.abs(val) > 0.2) { 
                                 // 现在不检查是否有棋子，直接覆盖显示
                                 board.addObject({
                                     type: "SL",
@@ -455,11 +455,8 @@
 
         // 点击落子
         board.addEventListener("click", (x, y) => {
-            // A. 形势判断模式下：
+            // A. 形势判断模式下：静默拦截
             if (showingEstimate) {
-                 // 只响应关闭操作？不，通常点击棋盘应该关闭形势并尝试落子，或者直接 return
-                 // 按照需求：只有自己关闭形势判断后才能继续行棋
-                 alert("请先关闭形势判断 (点击按钮或上方关闭) 再进行落子");
                  return;
             }
 
@@ -524,10 +521,16 @@
         }
 
         function estimateScore() {
-            // 如果已经显示，点击则关闭
+            // Toggle logic
             if (showingEstimate) {
                 closeEstimate();
                 return;
+            }
+
+            const btn = document.getElementById('btn-estimate');
+            if(btn) {
+                btn.innerText = "计算中...";
+                btn.style.background = "#95a5a6"; // grey
             }
 
             const statusDiv = document.getElementById('status');
@@ -543,6 +546,12 @@
                     sessionStorage.setItem('isEstimating', 'true');
                     sessionStorage.setItem('gameId', gameId);
 
+                    // Update button text to be the "Close" button
+                    if(btn) {
+                        btn.innerText = "关闭形势判断";
+                        btn.style.background = "#7f8c8d";
+                    }
+
                     // Add close button to status if not exists
                     // response 是从 ai.py 返回的 {rootInfo: {scoreLead...}, ownership...}
                     // 先处理数据格式
@@ -556,12 +565,15 @@
 
                     statusDiv.innerHTML = `
                         <span style="color:#d35400; font-weight:bold;">形势判断: ${leadText}</span> 
-                        <button onclick="closeEstimate()" style="padding:2px 8px; margin-left:10px; font-size:12px; vertical-align:middle; background:#7f8c8d;">关闭显示</button>
                     `;
                     
                     renderBoard(); // Will draw SQ because showingEstimate is true
                 } else {
                     statusDiv.innerText = "形势判断失败";
+                    if(btn) {
+                        btn.innerText = "形势判断";
+                        btn.style.background = "#8e44ad";
+                    }
                 }
             });
         }
@@ -571,9 +583,18 @@
             estimateData = null;
             sessionStorage.removeItem('estimationData'); // Clear cache
             sessionStorage.removeItem('isEstimating');
+            
+            // Restore button text
+            const btn = document.getElementById('btn-estimate');
+            if(btn) {
+                btn.innerText = "形势判断";
+                btn.style.background = "#8e44ad"; // purple
+            }
+
             renderBoard();
             // Restore status text (approximate)
-            updateStatus();
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerText = `手数: ${currentStones.length} | 上一步: ${lastMove || '无'}`;
         }
 
         function requestCount() {

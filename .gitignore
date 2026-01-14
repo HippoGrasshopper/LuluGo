@@ -2,3 +2,5 @@ __pycache__/
 .vscode/
 gtp_custom.cfg
 lulugo.db
+katago/
+analysis_logs/

@@ -6,7 +6,7 @@
     <title>LuluGo - 复盘</title>
     <script src="wgo.min.js"></script>
     <script src="socket.io.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="chart.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -220,19 +220,58 @@
                 currentStep = allMoves.length;
             }
              
-            // Setup chart after we know how many moves
-            setupChart(allMoves.length);
+            // Setup chart using real AI data if available
+            setupChart(allMoves.length, data.ai_winrates || []);
             
             render();
         }
 
         // --- Winrate Chart ---
-        function setupChart(totalMoves) {
+        function setupChart(totalMoves, aiWinrates) {
+             if (typeof Chart === 'undefined') {
+                 console.error("Chart.js failed to load");
+                 document.getElementById('winrate-container').innerHTML = '<p style="text-align:center;line-height:100px;margin:0;color:#95a5a6">Winrate Chart Unavailable</p>';
+                 return;
+             }
+
              const ctx = document.getElementById('winrate-chart').getContext('2d');
-             // Fake winrate data
-             const labels = Array.from({length: totalMoves + 1}, (_, i) => i);
-             const data = labels.map(i => 50 + Math.sin(i * 0.1) * 30 + (Math.random() - 0.5) * 5); // Mock
              
+             // Data Preparation
+             // Move 0: 对于中国规则 7.5 目贴目，黑棋初始胜率通常在 42%-43% 左右 (KataGo 评估)
+             // 为了避免图表开局就 50% 造成误解，如果没有实际 Move 0 分析数据，我们预设一个更科学的初始值，或者设为 null
+             let dataPoints = [42.5]; 
+             
+             // Map backend (0.0 - 1.0) to chart (0 - 100)
+             let hasRealData = false;
+             if (aiWinrates && aiWinrates.length > 0) {
+                 hasRealData = true;
+                 const scaled = aiWinrates.map(w => parseFloat((w * 100).toFixed(1)));
+                 
+                 // 如果 AI 数据比棋谱少（正在分析中），则只显示已有的
+                 dataPoints = dataPoints.concat(scaled);
+             } else {
+                 // No data available yet
+                 // Don't fake it with 50s, show empty or label
+                 dataPoints = [null]; // Start empty
+             }
+             
+             // Ensure data length matches moves (handle partial analysis)
+             // Fill remaining with null (gap)
+             while (dataPoints.length < totalMoves + 1) {
+                 dataPoints.push(null); 
+             }
+             
+             const labels = Array.from({length: dataPoints.length}, (_, i) => i);
+             
+             // Update Status if analyzing
+             if (!hasRealData && totalMoves > 0) {
+                 const s = document.getElementById('status');
+                 if(s && !s.innerText.includes("AI")) {
+                      // Append quietly
+                      // s.innerText += " (AI数据生成中...)"; 
+                 }
+             }
+
              winrateChart = new Chart(ctx, {
                 type: 'line',
                 data: {
@@ -240,23 +279,28 @@
                     datasets: [
                         {
                             label: '黑棋胜率',
-                            data: data,
+                            data: dataPoints,
                             borderColor: '#2c3e50',
                             backgroundColor: 'rgba(0,0,0,0)',
                             borderWidth: 2,
-                            pointRadius: 0,
+                            pointRadius: (ctx) => {
+                                const v = ctx.parsed.y;
+                                return v === null ? 0 : 2;
+                            },
                             tension: 0.1,
-                            yAxisID: 'y'
+                            yAxisID: 'y',
+                            spanGaps: false // Don't bridge huge gaps, let user see data is missing
                         },
                          {
                             label: '白棋胜率',
-                            data: data.map(x => 100 - x),
+                            data: dataPoints.map(x => x === null ? null : (100 - x)),
                             borderColor: '#ecf0f1',
                             borderWidth: 1,
                             borderDash: [5, 5],
                             pointRadius: 0,
                             tension: 0.1,
-                            yAxisID: 'y'
+                            yAxisID: 'y',
+                            spanGaps: false
                         }
                     ]
                 },
@@ -428,7 +472,7 @@
                 for(let y=0; y<19; y++) {
                     for(let x=0; x<19; x++) {
                         const val = estimateData.ownership[y][x]; 
-                        if (Math.abs(val) > 0.5) { 
+                        if (Math.abs(val) > 0.2) { 
                              // Draw everywhere (dead stones will be covered)
                              board.addObject({
                                  type: "SL",

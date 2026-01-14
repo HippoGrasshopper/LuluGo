@@ -1,176 +1,159 @@
 import random
 import time
 import copy
+import subprocess
+import json
+import os
+import threading
 
-class MockKataGoWrapper:
-    """
-    伪造的 AI 引擎 - 模拟 KataGo Analysis Engine JSON 格式
-    """
+# Paths relative to the workspace root
+KATAGO_EXE = os.path.join("katago", "katago.exe")
+KATAGO_CONFIG = os.path.join("katago", "analysis_example.cfg")
+KATAGO_MODEL = os.path.join("katago", "model.bin.gz")
+
+class KataGoWrapper:
     def __init__(self):
-        print("[MockAI] Using Mock API for KataGo. GPU not required.")
+        self.lock = threading.Lock()
+        self.process = None
+        # Start automatically
+        self._start_process()
+
+    def _start_process(self):
+        if not os.path.exists(KATAGO_EXE):
+            print(f"[KataGo] Error: Executable not found at {KATAGO_EXE}")
+            return
+            
+        cmd = [
+            KATAGO_EXE,
+            "analysis",
+            "-model", KATAGO_MODEL,
+            "-config", KATAGO_CONFIG
+        ]
+        
+        print(f"[KataGo] Starting engine: {' '.join(cmd)}")
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=os.getcwd()
+            )
+            # Start a thread to read stderr to prevent buffer fill up
+            self.stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+            self.stderr_thread.start()
+        except Exception as e:
+            print(f"[KataGo] Failed to start: {e}")
+
+    def _read_stderr(self):
+        while self.process and self.process.poll() is None:
+            try:
+                line = self.process.stderr.readline()
+                if line:
+                    # Optional: Print logs if needed
+                    # print(f"[KataGo Log] {line.strip()}")
+                    pass
+                else:
+                    time.sleep(0.1)
+            except:
+                break
+    
+    def close(self):
+        if self.process:
+            self.process.terminate()
+            self.process = None
 
     def analyze(self, moves, max_visits=500):
         """
         moves: list of [color, coord] like [["B", "Q16"], ["W", "D4"]]
         """
-        # 1. 模拟计算延迟
-        time.sleep(0.5)
-        
-        # 2. 计算当前基本状态
-        # 用一个临时的 board set 记录哪里有子，防止推荐到有子的地方
-        occupied = set()
-        for _, coord in moves:
-            if coord.upper() != "PASS":
-                occupied.add(coord.upper())
+        if not self.process:
+            print("[KataGo] Engine not running, attempting restart...")
+            self._start_process()
+            if not self.process:
+                return {"error": "KataGo engine unavailable"}
 
-        current_turn = "B" if len(moves) % 2 == 0 else "W"
+        # Prepare Query
+        query_id = f"q_{int(time.time()*1000)}"
+        query = {
+            "id": query_id,
+            "moves": moves,
+            "rules": "chinese",
+            "komi": 7.5,
+            "boardXSize": 19,
+            "boardYSize": 19,
+            "includeOwnership": True,
+            "maxVisits": max_visits
+        }
         
-        # 3. 生成可复现的随机数 (基于棋谱长度)
-        # 这样每次请求相同的局面，推荐是一样的，不会跳来跳去
-        rng = random.Random(len(moves) + 123) 
-
-        # 4. 生成基准黑棋胜率 (0.0 - 1.0)
-        # 假设游戏越往后，胜率越倾向于某一方
-        trend = rng.uniform(-0.3, 0.3) 
-        base_black_winrate = 0.5 + trend
-        base_black_winrate = max(0.05, min(0.95, base_black_winrate))
+        result = None
         
-        # 黑棋领先目数 (粗略估算: 胜率50%对应0目, 90%对应20目)
-        base_black_lead = (base_black_winrate - 0.5) * 40
-
-        # ==========构建返回值==========
-        
-        # A. Ownership (19x19)
-        # 规则：有子的地方一定是该颜色的 1.0/-1.0
-        # 空的地方随机生成，模拟地盘
-        ownership = []
-        cols = "ABCDEFGHJKLMNOPQRST"
-        for r_idx in range(19): # 0-18 (rows from top)
-            row_data = []
-            y_coord = 19 - r_idx
-            for c_idx in range(19): # 0-18
-                x_char = cols[c_idx]
-                gtp = f"{x_char}{y_coord}"
+        with self.lock:
+            try:
+                # Send Query
+                input_str = json.dumps(query) + "\n"
+                self.process.stdin.write(input_str)
+                self.process.stdin.flush()
                 
-                # 检查该位置是否有子
-                stone_color = None
-                for c, m in moves:
-                    if m == gtp:
-                        stone_color = c
+                # Read Response
+                while True:
+                    line = self.process.stdout.readline()
+                    if not line:
+                        print("[KataGo] Engine process ended unexpected.")
+                        self.process = None
                         break
+                        
+                    try:
+                        resp = json.loads(line)
+                        if resp.get("id") == query_id:
+                            result = resp
+                            break
+                    except json.JSONDecodeError:
+                        print(f"[KataGo] parse error: {line.strip()}")
+            except Exception as e:
+                print(f"[KataGo] IO Error: {e}")
+                self.process = None
                 
-                if stone_color == 'B':
-                    val = 1.0
-                elif stone_color == 'W':
-                    val = -1.0
-                else:
-                    # 没子的地方，稍微产生一些随机云雾
-                    val = rng.uniform(-0.8, 0.8)
-                    # 简单平滑一下，让它不那么杂乱 (Mock hack)
-                    if abs(val) < 0.2: val = 0
-                
-                row_data.append(val)
-            ownership.append(row_data)
+        if not result:
+            return {"error": "No response from KataGo"}
 
-        # B. Move Recommendations
-        # 随机找几个合法点作为推荐
-        valid_candidates = self._get_random_valid_moves(occupied, rng, count=4)
-        move_infos = []
+        if "error" in result:
+             return {"error": result["error"]}
+             
+        return self._format_response(result)
+
+    def _format_response(self, data):
+        # 1. Ownership: Flattened list -> 19x19 grid (row-major)
+        raw_ownership = data.get("ownership", [])
+        formatted_ownership = []
+        if raw_ownership and len(raw_ownership) == 361:
+             for r in range(19):
+                 row_start = r * 19
+                 row_data = raw_ownership[row_start : row_start + 19]
+                 formatted_ownership.append(row_data)
         
-        for idx, move_coord in enumerate(valid_candidates):
-            # 5. 为每个候选点生成带差异的胜率
-            # 改进逻辑：假设 base_black_winrate 是当前局面最佳水平
-            # 排名靠后的点意味着是更差的棋，会导致己方胜率下降（即黑胜率向不利于当前走棋方的方向移动）
-            
-            penalty = idx * 0.15 # 0.0, 0.15, 0.30 ...
-            
-            if current_turn == "B":
-                # 黑棋下坏棋 -> 黑胜率下降
-                simulated_winrate = base_black_winrate - penalty
-            else:
-                # 白棋下坏棋 -> 黑胜率上升
-                simulated_winrate = base_black_winrate + penalty
-
-            # Add small noise to avoid exact steps
-            simulated_winrate += rng.uniform(-0.02, 0.02)
-            
-            simulated_lead = (simulated_winrate - 0.5) * 40
-            
-            # 生成 PV (Principal Variation) - 10手后续
-            pv = self._generate_fake_pv(move_coord, current_turn, occupied, rng)
-            
+        # 2. Move Infos
+        move_infos = []
+        for info in data.get("moveInfos", []):
             move_infos.append({
-                "order": idx,
-                "move": move_coord,
-                "winrate": max(0.01, min(0.99, simulated_winrate)), # 限制范围
-                "scoreLead": round(simulated_lead, 1),
-                "pv": pv,
-                "visits": int(max_visits * (1 - idx*0.2)) # 排名越后，模拟次数越少
+                "move": info["move"],
+                "winrate": info["winrate"],
+                "scoreLead": info.get("scoreLead", 0),
+                "order": info["order"],
+                "pv": info.get("pv", []),
+                "visits": info.get("visits", 0)
             })
             
-        # 按照当前下棋者的利益排序
-        # 黑棋下：按黑胜率从大到小排
-        # 白棋下：按黑胜率从小到大排 (即白胜率大到小)
-        if current_turn == "B":
-            move_infos.sort(key=lambda x: x["winrate"], reverse=True)
-        else:
-            move_infos.sort(key=lambda x: x["winrate"], reverse=False)
-
-        # 取前3个
-        final_recommendations = move_infos[:3]
-
+        # 3. Root Info
+        root_info = data.get("rootInfo", {})
+        # Ensure winrate is float if needed
+        
         return {
-            "rootInfo": {
-                "winrate": base_black_winrate,
-                "scoreLead": round(base_black_lead, 1),
-                "visits": max_visits,
-                "currentPlayer": current_turn
-            },
-            "ownership": ownership,
-            "moveInfos": final_recommendations
+            "ownership": formatted_ownership,
+            "moveInfos": move_infos, 
+            "rootInfo": root_info
         }
 
-    def _get_random_valid_moves(self, occupied_set, rng, count=3):
-        cols = "ABCDEFGHJKLMNOPQRST"
-        rows = range(1, 20)
-        candidates = []
-        attempts = 0
-        while len(candidates) < count and attempts < 100:
-            c = rng.choice(cols)
-            r = rng.choice(rows)
-            coord = f"{c}{r}"
-            if coord not in occupied_set and coord not in candidates:
-                candidates.append(coord)
-            attempts += 1
-        return candidates
-
-    def _generate_fake_pv(self, start_move, start_color, occupied_set, rng):
-        """生成10步假PV"""
-        pv = [start_move]
-        temp_occupied = occupied_set.copy()
-        temp_occupied.add(start_move)
-        
-        next_turn = "W" if start_color == "B" else "B"
-        
-        for _ in range(9):
-            # 简单随机找合法点
-            found = None
-            for _ in range(20):
-                c = rng.choice("ABCDEFGHJKLMNOPQRST")
-                r = rng.choice(range(1, 20))
-                coord = f"{c}{r}"
-                if coord not in temp_occupied:
-                    found = coord
-                    break
-            
-            if found:
-                pv.append(found)
-                temp_occupied.add(found)
-            else:
-                pv.append("PASS")
-            
-            next_turn = "W" if next_turn == "B" else "B"
-            
-        return pv
-
-ai_engine = MockKataGoWrapper()
+# ai_engine = MockKataGoWrapper()
+ai_engine = KataGoWrapper()

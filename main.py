@@ -9,6 +9,8 @@ import uvicorn
 from database import init_db, create_user, get_user_by_username, create_game, get_game
 from database import get_waiting_games, get_playing_games, get_history_games, update_game
 from game import GameEngine
+from ai import ai_engine
+import asyncio
 
 # ==================== 初始化 ====================
 
@@ -97,7 +99,8 @@ async def api_get_game(game_id: int):
             "moves": game.get_moves(),
             "current_turn": game.current_turn,
             "winner": game.winner,
-            "result": game.result_detail
+            "result": game.result_detail,
+            "ai_winrates": game.get_ai_winrates()
         }
 
 @app.delete("/api/games/{game_id}")
@@ -231,6 +234,29 @@ async def join_room(sid, data):
     
     print(f"[Room] User {user_id} 加入对局 {game_id} (Player: {is_player})")
 
+async def run_analysis_and_save(game_id, moves):
+    """后台运行 KataGo 分析并将胜率存入数据库"""
+    try:
+        # Fast analysis for tracking (low visits)
+        result = await asyncio.to_thread(ai_engine.analyze, moves, max_visits=100)
+        
+        if "rootInfo" in result and "winrate" in result["rootInfo"]:
+             winrate = result["rootInfo"]["winrate"]
+             
+             # Save to DB
+             from database import get_session, Game
+             with get_session() as session:
+                 game = session.get(Game, game_id)
+                 if game:
+                     winrates = game.get_ai_winrates()
+                     winrates.append(round(winrate, 3))
+                     game.set_ai_winrates(winrates)
+                     session.add(game)
+                     session.commit()
+                     print(f"[AI] Saved winrate for game {game_id}: {winrate:.3f}")
+    except Exception as e:
+        print(f"[AI] Background analysis failed: {e}")
+
 @sio.event
 async def make_move(sid, data):
     """落子"""
@@ -274,6 +300,9 @@ async def make_move(sid, data):
         
         print(f"[Move] Game {game_id}: {game.current_turn} plays {coord}. Next: {next_turn}")
 
+        # 触发后台分析
+        asyncio.create_task(run_analysis_and_save(game_id, engine.moves))
+
         # 广播给房间所有人 (不包含 is_player，因为这是静态身份)
         await sio.emit("board_update", {
             "moves": engine.get_current_stones(),
@@ -301,6 +330,18 @@ async def undo_game(sid, data):
         next_turn = 'B' if len(engine.moves) % 2 == 0 else 'W'
         update_game(game_id, moves_json=json.dumps(engine.moves), current_turn=next_turn)
         
+        # 同步回滚 AI 胜率数据
+        from database import get_session, Game
+        with get_session() as session:
+            game = session.get(Game, game_id)
+            if game:
+                winrates = game.get_ai_winrates()
+                if winrates:
+                    winrates.pop()
+                    game.set_ai_winrates(winrates)
+                    session.add(game)
+                    session.commit()
+
         await sio.emit("board_update", {
             "moves": engine.get_current_stones(),
             "turn": next_turn,
@@ -334,7 +375,6 @@ async def resign_game(sid, data):
         del active_games[game_id]
 
 # ==================== AI Logic ====================
-from ai import ai_engine
 
 @sio.event
 async def estimate_score(sid, data):
