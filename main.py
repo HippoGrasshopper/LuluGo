@@ -387,8 +387,9 @@ async def estimate_score(sid, data):
         moves = data.get("moves", [])
         
     import asyncio
-    # 改为调用新的 analyze 接口
-    result = await asyncio.to_thread(ai_engine.analyze, moves, max_visits=100)
+    # Increase visits to get deeper/more stable variations (e.g. 10+ moves)
+    # 100 was too fast/shallow resulting in short PVs (4-8 moves)
+    result = await asyncio.to_thread(ai_engine.analyze, moves, max_visits=600)
     
     # 直接透传整个结果给前端，前端去决定怎么展示
     return result
