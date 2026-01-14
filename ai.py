@@ -78,17 +78,21 @@ class MockKataGoWrapper:
         move_infos = []
         
         for idx, move_coord in enumerate(valid_candidates):
-            # 制造差异：最好的某一步会让胜率对当前下棋者有利
-            # 如果是黑棋下，好的棋会让黑胜率变高
-            # 如果是白棋下，好的棋会让黑胜率变低 (即白胜率变高)
+            # 5. 为每个候选点生成带差异的胜率
+            # 改进逻辑：假设 base_black_winrate 是当前局面最佳水平
+            # 排名靠后的点意味着是更差的棋，会导致己方胜率下降（即黑胜率向不利于当前走棋方的方向移动）
             
-            # Increased multiplier from 0.05 to 0.15 to make colors more distinct
-            quality_boost = (3 - idx) * 0.15  # 0.45, 0.30, 0.15...
+            penalty = idx * 0.15 # 0.0, 0.15, 0.30 ...
             
             if current_turn == "B":
-                simulated_winrate = base_black_winrate + quality_boost
+                # 黑棋下坏棋 -> 黑胜率下降
+                simulated_winrate = base_black_winrate - penalty
             else:
-                simulated_winrate = base_black_winrate - quality_boost
+                # 白棋下坏棋 -> 黑胜率上升
+                simulated_winrate = base_black_winrate + penalty
+
+            # Add small noise to avoid exact steps
+            simulated_winrate += rng.uniform(-0.02, 0.02)
             
             simulated_lead = (simulated_winrate - 0.5) * 40
             

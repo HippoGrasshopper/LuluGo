@@ -166,6 +166,33 @@
         let recommendationData = null; // List of moveInfos
         let currentEvolutionPV = []; // List of moves
 
+        // Define Custom Draw Handler for Solid Circle (AI Recommendation Stone) with Text
+        // Must follow WGo internal structure: { stone: { draw: fn } }
+        WGo.Board.drawHandlers.CRS = {
+            stone: {
+                draw: function(args, board) {
+                    const xr = board.getX(args.x);
+                    const yr = board.getY(args.y);
+                    const sr = board.stoneRadius;
+                    
+                    // 1. Draw Circle
+                    this.fillStyle = args.c || "rgba(0, 230, 118, 0.5)";
+                    this.beginPath();
+                    this.arc(xr, yr, sr, 0, 2 * Math.PI, true);
+                    this.fill();
+                    
+                    // 2. Draw Text (Winrate) if provided
+                    if (args.text) {
+                        this.fillStyle = "black";
+                        this.font = "bold " + (sr * 0.85) + "px sans-serif"; // Increased scaling
+                        this.textAlign = "center";
+                        this.textBaseline = "middle";
+                        this.fillText(args.text, xr, yr);
+                    }
+                }
+            }
+        };
+
         const board = new WGo.Board(document.getElementById('board-container'), {
             width: 500,
             size: 19,
@@ -344,20 +371,32 @@
             // 4. Draw Recommendation (Green Squares)
             if (isRecommendationMode && !isEvolutionMode && recommendationData && !showingEstimate) {
                 const top3 = recommendationData.slice(0, 3);
+                
                 top3.forEach(info => {
                     const p = fromGTP(info.move);
+                    
+                    // Revert to Winrate-based Alpha (as requested)
+                    // The backend now provides larger winrate gaps for visual distinctness
                     let w = info.winrate;
                     if (game.turn === WGo.W) w = 1.0 - w; 
                     
                     const intensity = Math.max(0, Math.min(1, w));
-                    const alpha = Math.max(0.2, intensity).toFixed(2);
-                    const colorStr = `rgba(0, 255, 0, ${alpha})`;
+                    // Base visibility 0.2 -> 0.25 for better aesthetics
+                    const alpha = Math.max(0.25, intensity).toFixed(2);
+                    
+                    // Keep the Vibrant Material Green
+                    const colorStr = `rgba(0, 230, 118, ${alpha})`;
+                    
+                    // Format winrate percentage (e.g. "56.2")
+                    const winrateText = (w * 100).toFixed(1);
 
+                    // Use new Custom Round Solid handler
                     board.addObject({
-                        type: "SL",
+                        type: "CRS",
                         x: p.x,
                         y: p.y,
-                        c: colorStr
+                        c: colorStr,
+                        text: winrateText
                     });
                 });
             }
