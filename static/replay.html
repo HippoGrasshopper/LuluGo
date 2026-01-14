@@ -44,13 +44,14 @@
             justify-content: center;
         }
         button {
-            padding: 8px 16px;
+            padding: 10px 15px;
             border: none;
             border-radius: 6px;
             background: #3498db;
             color: white;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 15px;
+            white-space: nowrap; /* Prevent vertical text */
         }
         button:hover { background: #2980b9; }
         input[type="range"] {
@@ -104,7 +105,9 @@
         <button onclick="jumpTo(allMoves.length)" id="btn-end">⏭</button>
         
         <button id="btn-exit-trial" onclick="exitTrial()" style="display:none; background:#e67e22;">退出试下</button>
-        <button onclick="estimateScore()" style="background:#8e44ad; margin-left:10px;">形势判断</button>
+        <button id="btn-ai-recommend" onclick="toggleRecommendation()" style="background:#27ae60; margin-left:10px;">AI推荐</button>
+        <button id="btn-exit-recommend" onclick="closeRecommendation()" style="display:none; background:#7f8c8d; margin-left:10px;">返回</button>
+        <button id="btn-estimate" onclick="estimateScore()" style="background:#8e44ad; margin-left:10px;">形势判断</button>
     </div>
 
     <script>
@@ -156,6 +159,12 @@
         let trialMoves = [];
         let trialStartStep = 0;
         let currentTrialStep = 0;
+
+        // --- AI Recommendation State ---
+        let isRecommendationMode = false;
+        let isEvolutionMode = false;
+        let recommendationData = null; // List of moveInfos
+        let currentEvolutionPV = []; // List of moves
 
         const board = new WGo.Board(document.getElementById('board-container'), {
             width: 500,
@@ -259,7 +268,30 @@
                 trialMoves.slice(0, currentTrialStep).forEach(m => game.play(m.x, m.y, m.c));
             }
 
-            // Draw Board
+            // 3. Evolution Moves (Apply to game state so captures work)
+            let evolutionCoords = [];
+            // Apply evolution moves even if estimating score (so we see what we are estimating)
+            if (isEvolutionMode && currentEvolutionPV) {
+                currentEvolutionPV.forEach(gtp => {
+                    const movePair = gtp.match(/([BWbw])?\[?([a-zA-Z]\d+)\]?/); // Try parse or just assume GTP string
+                    // Actually our PV from mock is just coords like "Q16", "D4" or "PASS"
+                    // But we need to know whose turn it is
+                    const turn = game.turn; // WGo.B (1) or WGo.W (-1)
+                    
+                    if (gtp.toUpperCase() === 'PASS') {
+                        game.pass(turn);
+                        evolutionCoords.push(null);
+                    } else {
+                        const p = fromGTP(gtp);
+                        // game.play automatically handles removing captured stones
+                        const res = game.play(p.x, p.y, turn);
+                        // Store coord for labeling
+                        evolutionCoords.push({x: p.x, y: p.y, c: turn});
+                    }
+                });
+            }
+
+            // Draw Board (Stones)
             board.removeAllObjects();
             const position = game.getPosition();
             for (let x = 0; x < 19; x++) {
@@ -269,11 +301,16 @@
                 }
             }
             
-            // Draw Last Move (Simplified)
+            // Draw Last Move (Modified logic)
+            // If Evolution Mode, last move is the last of PV
             let lastMoveObj = null;
             
-            // Determine logical last move based on mode
-            if (isTrialMode) {
+            if (isEvolutionMode) {
+                 // Last move of PV
+                 // But wait, user might want to see the move BEFORE evolution as "marked"? 
+                 // Usually for evolution, we label 1-10, so no single "last move" marker needed usually.
+                 // So we skip CR marker for last move in Evolution mode.
+            } else if (isTrialMode) {
                 if (currentTrialStep > 0) {
                     const m = trialMoves[currentTrialStep - 1];
                     lastMoveObj = {x: m.x, y: m.y, c: m.c};
@@ -295,7 +332,7 @@
             }
 
             // Draw Last Move Marker
-            if (lastMoveObj && !showingEstimate) {
+            if (lastMoveObj && !showingEstimate && !isEvolutionMode) {
                 board.addObject({
                     type: "CR",
                     x: lastMoveObj.x,
@@ -304,6 +341,42 @@
                 });
             }
             
+            // 4. Draw Recommendation (Green Squares)
+            if (isRecommendationMode && !isEvolutionMode && recommendationData && !showingEstimate) {
+                const top3 = recommendationData.slice(0, 3);
+                top3.forEach(info => {
+                    const p = fromGTP(info.move);
+                    let w = info.winrate;
+                    if (game.turn === WGo.W) w = 1.0 - w; 
+                    
+                    const intensity = Math.max(0, Math.min(1, w));
+                    const alpha = Math.max(0.2, intensity).toFixed(2);
+                    const colorStr = `rgba(0, 255, 0, ${alpha})`;
+
+                    board.addObject({
+                        type: "SL",
+                        x: p.x,
+                        y: p.y,
+                        c: colorStr
+                    });
+                });
+            }
+
+            // 5. Draw Evolution Labels (Numbers)
+            if (isEvolutionMode && evolutionCoords.length > 0 && !showingEstimate) {
+                evolutionCoords.forEach((obj, index) => {
+                     if (!obj) return; // PASS
+                     // Draw Label (Number)
+                     board.addObject({
+                         type: "LB",
+                         x: obj.x,
+                         y: obj.y,
+                         c: obj.c === WGo.B ? "white" : "black",
+                         text: (index + 1).toString()
+                     });
+                });
+            }
+
             // Draw Estimation (Solid Squares)
             if (showingEstimate && estimateData && estimateData.ownership) {
 
@@ -333,7 +406,7 @@
             
              // Toggle Chart Visibility
             const chartContainer = document.getElementById('winrate-container');
-            if (isTrialMode) {
+            if (isTrialMode || isRecommendationMode || isEvolutionMode) {
                 chartContainer.style.display = 'none';
             } else {
                 chartContainer.style.display = 'block';
@@ -355,11 +428,17 @@
             const statusDiv = document.getElementById('status');
             const slider = document.getElementById('slider');
             const exitBtn = document.getElementById('btn-exit-trial');
+            const recommendBtn = document.getElementById('btn-ai-recommend');
+            const exitRecBtn = document.getElementById('btn-exit-recommend');
+            const estimateBtn = document.getElementById('btn-estimate');
             
             // 1. Status Text
             if (showingEstimate) {
                  statusDiv.innerText = "形势判断";
                  statusDiv.style.color = "#d35400";
+            } else if (isRecommendationMode || isEvolutionMode) {
+                 statusDiv.innerText = "AI 推荐";
+                 statusDiv.style.color = "#2ecc71";
             } else if (isTrialMode) {
                  statusDiv.innerText = "试下中";
                  statusDiv.style.color = "#e67e22";
@@ -369,20 +448,88 @@
             }
             
             // 2. Controls Visibility
-            // If in trial mode, hide progress bar but keep buttons
-            if (isTrialMode) {
-                slider.style.visibility = 'hidden'; 
-                if(exitBtn) exitBtn.style.display = 'inline-block';
+            const isNormal = !isTrialMode && !isRecommendationMode && !isEvolutionMode;
+            
+            // Base visibility - Use display: none instead of visibility: hidden to remove space
+            slider.style.display = (isNormal && !showingEstimate) ? 'block' : 'none';
+            
+            // Exit Trial Button: Only show if in Trial Mode AND NOT in AI modes
+            // This prevents exiting trial while AI recommendation is still active on board
+            if(exitBtn) {
+                 exitBtn.style.display = (isTrialMode && !isRecommendationMode && !isEvolutionMode) ? 'inline-block' : 'none';
+            }
+            
+            // AI Recommends Button Logic
+            // Can be clicked in normal or trial, but hidden if already in recommendation/evolution
+            if (isRecommendationMode || isEvolutionMode) {
+                recommendBtn.style.display = 'none';
+                exitRecBtn.style.display = (showingEstimate) ? 'none' : 'inline-block'; // Hide back button if estimating
             } else {
-                slider.style.visibility = 'visible';
+                recommendBtn.style.display = (showingEstimate) ? 'none' : 'inline-block'; // Hide recommend button if estimating
+                exitRecBtn.style.display = 'none';
+            }
+            
+            // Update Estimate Button Text
+            if (estimateBtn) {
+                if (showingEstimate) {
+                    estimateBtn.innerText = "关闭形势判断";
+                    estimateBtn.style.background = "#7f8c8d"; // Grey
+                } else {
+                    estimateBtn.innerText = "形势判断";
+                    estimateBtn.style.background = "#8e44ad"; // Purple
+                }
+            }
+            
+            if (showingEstimate) {
+                // If estimating, disable almost everything
+                slider.disabled = true;
+            } else {
+                slider.disabled = false;
                 slider.value = currentStep;
-                slider.disabled = showingEstimate;
-                if(exitBtn) exitBtn.style.display = 'none';
             }
             
             board.currentTurnColor = game.turn;
         }
         
+        // --- AI Recommendation Logic ---
+        function toggleRecommendation() {
+            if (showingEstimate) { alert("请先关闭形势判断"); return; }
+            
+            const btn = document.getElementById('btn-ai-recommend');
+            const originalText = btn.innerText;
+            btn.innerText = "请求中...";
+            
+            // Construct moves list similar to estimate
+            const limit = isTrialMode ? trialStartStep : currentStep;
+            let moves = allMoves.slice(0, limit);
+            if (isTrialMode && trialMoves.length > 0) {
+                 const extraMoves = trialMoves.slice(0, currentTrialStep).map(m => {
+                     return [m.c === WGo.B ? "B" : "W", toGTP(m.x, m.y)];
+                 });
+                 moves = moves.concat(extraMoves);
+            }
+            
+            socket.emit('estimate_score', {moves: moves}, (response) => {
+                btn.innerText = originalText;
+                if (response && response.moveInfos) {
+                    isRecommendationMode = true;
+                    recommendationData = response.moveInfos;
+                    render();
+                } else {
+                    alert("获取推荐失败");
+                }
+            });
+        }
+        
+        function closeRecommendation() {
+            // Reset ALL AI states to exit completely
+            isEvolutionMode = false;
+            currentEvolutionPV = [];
+            isRecommendationMode = false;
+            recommendationData = null;
+            render();
+        }
+
         // --- Estimation Logic ---
         function estimateScore() {
             if (showingEstimate) {
@@ -390,10 +537,10 @@
                 return;
             }
             
-            const btn = event.target; // Simple hack to get button
-            const originText = btn.innerText;
+            const btn = document.getElementById('btn-estimate');
+            const originalText = btn.innerText;
             btn.innerText = "计算中...";
-
+            
             // Construct moves list based on current state (including trial moves)
             const limit = isTrialMode ? trialStartStep : currentStep;
             let moves = allMoves.slice(0, limit);
@@ -405,9 +552,21 @@
                  });
                  moves = moves.concat(extraMoves);
             }
+
+            // If in Evolution Mode, append the evolution PV moves
+            if (isEvolutionMode && currentEvolutionPV && currentEvolutionPV.length > 0) {
+                 // Determine next color properly
+                 let nextColor = (moves.length % 2 === 0) ? "B" : "W";
+                 const evoMoves = currentEvolutionPV.map(coord => {
+                      const move = [nextColor, coord];
+                      nextColor = (nextColor === "B") ? "W" : "B";
+                      return move;
+                 });
+                 moves = moves.concat(evoMoves);
+            }
             
             socket.emit('estimate_score', {moves: moves}, (response) => {
-                btn.innerText = originText; // Restore button text
+                btn.innerText = originalText; // Restore button text
                 if (response && response.ownership) {
                     showingEstimate = true;
                     estimateData = response;
@@ -434,10 +593,29 @@
 
         // --- Board Clicks ---
         board.addEventListener("click", (x, y) => {
-            // 如果处于形势判断模式，必须先关闭
+            // Priority 1: If showing Estimate, block all
             if (showingEstimate) {
                  alert("请先关闭形势判断功能");
                  return;
+            }
+            
+            // Priority 2: Evolution Mode -> Block all except Back (Button handled elsewhere)
+            if (isEvolutionMode) {
+                return;
+            }
+
+            // Priority 3: Recommendation Mode -> Check for recommend points
+            if (isRecommendationMode) {
+                const gtp = toGTP(x, y);
+                // Check if click is on one of the top 3 recommendations
+                const hit = recommendationData.slice(0, 3).find(info => info.move === gtp);
+                if (hit) {
+                    // Enter Evolution Mode
+                    isEvolutionMode = true;
+                    currentEvolutionPV = hit.pv;
+                    render();
+                }
+                return; // Stop here, don't place stones
             }
 
             if (x < 0 || y < 0 || x >= 19 || y >= 19) return;

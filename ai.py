@@ -82,7 +82,8 @@ class MockKataGoWrapper:
             # 如果是黑棋下，好的棋会让黑胜率变高
             # 如果是白棋下，好的棋会让黑胜率变低 (即白胜率变高)
             
-            quality_boost = (3 - idx) * 0.05  # 0.15, 0.10, 0.05...
+            # Increased multiplier from 0.05 to 0.15 to make colors more distinct
+            quality_boost = (3 - idx) * 0.15  # 0.45, 0.30, 0.15...
             
             if current_turn == "B":
                 simulated_winrate = base_black_winrate + quality_boost
