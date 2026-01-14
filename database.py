@@ -182,6 +182,35 @@ def get_history_games():
             for g in games
         ]
 
+def get_all_users():
+    """获取所有用户"""
+    with get_session() as session:
+        users = session.exec(select(User)).all()
+        return users
+
+def delete_user_and_games(user_id: int):
+    """删除用户及其相关的对局"""
+    with get_session() as session:
+        user = session.get(User, user_id)
+        if not user:
+            return False, "用户不存在"
+        
+        # 查找相关对局
+        games = session.exec(
+            select(Game).where(
+                (Game.black_player_id == user_id) | (Game.white_player_id == user_id)
+            )
+        ).all()
+        
+        # 删除对局
+        for game in games:
+            session.delete(game)
+            
+        # 删除用户
+        session.delete(user)
+        session.commit()
+        return True, f"删除了用户 {user.username} 和 {len(games)} 个关联对局"
+
 def update_game(game_id: int, **kwargs):
     """更新对局信息"""
     with get_session() as session:

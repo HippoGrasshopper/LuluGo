@@ -8,6 +8,7 @@ import uvicorn
 
 from database import init_db, create_user, get_user_by_username, create_game, get_game
 from database import get_waiting_games, get_playing_games, get_history_games, update_game
+from database import get_all_users, delete_user_and_games
 from game import GameEngine
 from ai import ai_engine
 import asyncio
@@ -114,6 +115,18 @@ async def api_delete_game(game_id: int):
             session.commit()
             return {"success": True}
     raise HTTPException(status_code=404, detail="Game not found")
+
+@app.get("/api/users")
+async def api_get_users():
+    users = get_all_users()
+    return {"users": users}
+
+@app.delete("/api/users/{user_id}")
+async def api_delete_user(user_id: int):
+    success, msg = delete_user_and_games(user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=msg)
+    return {"success": True, "msg": msg}
 
 # ==================== Socket.IO ====================
 
@@ -472,12 +485,59 @@ if __name__ == "__main__":
         s.connect(('8.8.8.8', 80))
         local_ip = s.getsockname()[0]
         s.close()
-        print(f"========================================")
+        # print(f"========================================")
         print(f">>> 电脑访问: http://localhost:8000")
         print(f">>> 手机访问: http://{local_ip}:8000")
-        print(f"========================================")
+        # print(f"========================================")
     except:
         print("无法获取局域网IP")
         
+    # --- Ngrok Integration ---
+    import os, subprocess, atexit, time, urllib.request, json, shutil
+    
+    ngrok_cmd = None
+    if os.path.exists("ngrok.exe"):
+        ngrok_cmd = "ngrok.exe"
+    elif shutil.which("ngrok"):
+        ngrok_cmd = "ngrok"
+
+    if ngrok_cmd:
+        try:
+            print(f"[Info] Starting {ngrok_cmd}...")
+            # Start ngrok in background
+            ngrok_process = subprocess.Popen(
+                [ngrok_cmd, "http", "8000"], 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL
+            )
+            
+            # Register cleanup on exit
+            def cleanup_ngrok():
+                if ngrok_process.poll() is None:
+                    print(f"[Info] Shutting down ngrok...")
+                    ngrok_process.terminate()
+            atexit.register(cleanup_ngrok)
+            
+            # Wait for initialization
+            time.sleep(2)
+            
+            # Fetch URL
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels") as response:
+                    data = json.load(response)
+                    # Find the public URL (usually the first tunnel)
+                    tunnels = data.get('tunnels', [])
+                    if tunnels:
+                        public_url = tunnels[0]['public_url']
+                        # print(f"========================================")
+                        print(f">>> Ngrok Public URL: {public_url}")
+                        # print(f"========================================")
+            except Exception as e:
+                # Ngrok might not have started or API not ready
+                pass
+                
+        except Exception as e:
+            print(f"[Error] Failed to manage ngrok: {e}")
+            
     # 禁止 access log 以减少噪音
     uvicorn.run(application, host="0.0.0.0", port=8000, access_log=False)

@@ -4,37 +4,120 @@
     <meta charset="UTF-8">
     <title>LuluGo - 管理员</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; }
-        .game-item { padding: 10px; border-bottom: 1px solid #ccc; display: flex; justify-content: space-between; }
-        .btn-del { background: red; color: white; border: none; padding: 5px 10px; cursor: pointer; }
+        body { font-family: sans-serif; padding: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; display: flex; gap: 20px; }
+        .panel { flex: 1; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        h2 { border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555; }
+        .item { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .item:last-child { border-bottom: none; }
+        .btn-del { background: #e74c3c; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; transition: background 0.2s; }
+        .btn-del:hover { background: #c0392b; }
+        .status-badge { padding: 2px 6px; border-radius: 3px; font-size: 0.8em; color: white; }
+        .status-WAITING { background: #f39c12; }
+        .status-PLAYING { background: #2ecc71; }
+        .status-ENDED { background: #7f8c8d; }
     </style>
 </head>
 <body>
-    <h1>管理员面板</h1>
-    <div id="list"></div>
+    <h1>LuluGo 管理后台</h1>
+    
+    <div class="container">
+        <!-- 用户管理 -->
+        <div class="panel">
+            <h2>👤 用户管理</h2>
+            <div id="user-list">加载中...</div>
+        </div>
+
+        <!-- 对局管理 -->
+        <div class="panel">
+            <h2>🎮 对局管理</h2>
+            <div id="game-list">加载中...</div>
+        </div>
+    </div>
+
     <script>
-        async function load() {
-            // Load waiting, playing, history
-            const w = await (await fetch('/api/games/waiting')).json();
-            const p = await (await fetch('/api/games/playing')).json();
-            const h = await (await fetch('/api/games/history')).json();
-            const all = [...w.games, ...p.games, ...h.games];
-            
-            document.getElementById('list').innerHTML = all.map(g => `
-                <div class="game-item">
-                    <span>#${g.id} (${g.status}) - 黑:${g.black} 白:${g.white}</span>
-                    <button class="btn-del" onclick="del(${g.id})">删除</button>
-                </div>
-            `).join('');
+        async function loadData() {
+            await Promise.all([loadUsers(), loadGames()]);
         }
-        
-        async function del(id) {
-            if(confirm('Confirm delete?')) {
-                await fetch(`/api/games/${id}`, { method: 'DELETE' });
-                load();
+
+        async function loadUsers() {
+            try {
+                const res = await fetch('/api/users');
+                const data = await res.json();
+                const users = data.users || [];
+                
+                document.getElementById('user-list').innerHTML = users.map(u => `
+                    <div class="item">
+                        <div>
+                            <strong>${u.username}</strong> <span style="color:#999; font-size:0.9em;">(ID: ${u.id})</span>
+                            <br><small style="color:#bbb;">注册: ${new Date(u.created_at).toLocaleDateString()}</small>
+                        </div>
+                        <button class="btn-del" onclick="deleteUser(${u.id}, '${u.username}')">删除用户</button>
+                    </div>
+                `).join('') || '<div style="padding:10px; text-align:center; color:#999;">暂无用户</div>';
+            } catch (e) {
+                console.error(e);
+                document.getElementById('user-list').innerHTML = '<div style="color:red">加载失败</div>';
             }
         }
-        load();
+
+        async function loadGames() {
+            try {
+                const [w, p, h] = await Promise.all([
+                    (await fetch('/api/games/waiting')).json(),
+                    (await fetch('/api/games/playing')).json(),
+                    (await fetch('/api/games/history')).json()
+                ]);
+                
+                // Helper to format games
+                const format = (list, defaultStatus) => list.map(g => ({...g, _status: g.status || defaultStatus}));
+                
+                const all = [
+                    ...format(w.games, 'WAITING'),
+                    ...format(p.games, 'PLAYING'),
+                    ...format(h.games, 'ENDED')
+                ].sort((a,b) => b.id - a.id);
+
+                document.getElementById('game-list').innerHTML = all.map(g => {
+                    let statusClass = 'status-' + (g._status === 'FINISHED' ? 'ENDED' : g._status);
+                    return `
+                    <div class="item">
+                        <div>
+                            <span class="status-badge ${statusClass}">${g._status}</span> 
+                            <strong>#${g.id}</strong>
+                            <span style="margin: 0 5px;">⚫${g.black} vs ⚪${g.white}</span>
+                        </div>
+                        <button class="btn-del" onclick="deleteGame(${g.id})">删除</button>
+                    </div>
+                `}).join('') || '<div style="padding:10px; text-align:center; color:#999;">暂无对局</div>';
+            } catch (e) {
+                console.error(e);
+                document.getElementById('game-list').innerHTML = '<div style="color:red">加载失败</div>';
+            }
+        }
+        
+        async function deleteGame(id) {
+            if(confirm(`确定要删除对局 #${id} 吗？`)) {
+                await fetch(`/api/games/${id}`, { method: 'DELETE' });
+                loadGames();
+            }
+        }
+
+        async function deleteUser(id, name) {
+            if(confirm(`⚠️ 警告！\n\n确定要删除用户 "${name}" (ID: ${id}) 吗？\n\n这将同时删除所有该用户参与的对局！此操作无法撤销。`)) {
+                const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+                const data = await res.json();
+                if(data.success) {
+                    alert(data.msg);
+                    loadData(); // Reload both lists
+                } else {
+                    alert("删除失败: " + data.detail);
+                }
+            }
+        }
+
+        loadData();
     </script>
 </body>
 </html>
