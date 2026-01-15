@@ -91,6 +91,7 @@
     <div class="container">
         <div class="section">
             <button class="btn-create" onclick="showCreateModal()">+ 创建对局</button>
+            <button class="btn-create" style="background:#8e44ad" onclick="createAIGame()">🤖 AI 训练</button>
         </div>
 
         <div class="section">
@@ -238,6 +239,22 @@
                 closeModal();
                 window.location.href = `/static/game.html?id=${data.game_id}`;
             }
+        }
+
+        async function createAIGame() {
+             if (!confirm("开始与 KataGo (中国规则) 的对局？")) return;
+             
+             const res = await fetch('/api/games/create_ai', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({user_id: parseInt(userId), color: '?'})
+             });
+             const data = await res.json();
+             if (data.success) {
+                 window.location.href = `/static/game.html?id=${data.game_id}`;
+             } else {
+                 alert("创建失败");
+             }
         }
 
         function joinGame(gameId) {

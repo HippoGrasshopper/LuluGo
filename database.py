@@ -65,6 +65,16 @@ engine = create_engine(DATABASE_URL, echo=False)
 
 def init_db():
     SQLModel.metadata.create_all(engine)
+    
+    # Ensure AI User exists
+    with get_session() as session:
+        ai_user = session.exec(select(User).where(User.username == "KataGo")).first()
+        if not ai_user:
+            ai_user = User(username="KataGo")
+            session.add(ai_user)
+            session.commit()
+            print("[Database] Created AI User 'KataGo'")
+
     print("[Database] 数据库初始化完成")
 
 def get_session():
@@ -188,6 +198,12 @@ def get_all_users():
         users = session.exec(select(User)).all()
         return users
 
+def get_username(user_id: int) -> Optional[str]:
+    with get_session() as session:
+        user = session.get(User, user_id)
+        return user.username if user else None
+
+
 def delete_user_and_games(user_id: int):
     """删除用户及其相关的对局"""
     with get_session() as session:
@@ -220,3 +236,33 @@ def update_game(game_id: int, **kwargs):
                 setattr(game, key, value)
             game.updated_at = datetime.now()
             session.commit()
+
+def create_ai_game(creator_id: int) -> Game:
+    """创建与AI的对局 (猜先)"""
+    with get_session() as session:
+        # User vs KataGo
+        ai_user = session.exec(select(User).where(User.username == "KataGo")).first()
+        if not ai_user:
+            ai_user = User(username="KataGo")
+            session.add(ai_user)
+            session.commit()
+            session.refresh(ai_user)
+            
+        game = Game()
+        import random
+        # 猜先
+        is_user_black = random.choice([True, False])
+        
+        if is_user_black:
+            game.black_player_id = creator_id
+            game.white_player_id = ai_user.id
+        else:
+            game.white_player_id = creator_id
+            game.black_player_id = ai_user.id
+            
+        game.status = "PLAYING" # Create and Start
+        
+        session.add(game)
+        session.commit()
+        session.refresh(game)
+        return game

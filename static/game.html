@@ -6,6 +6,7 @@
     <title>LuluGo - 对弈</title>
     <script src="wgo.min.js"></script>
     <script src="socket.io.min.js"></script>
+    <script src="chart.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -17,14 +18,23 @@
             align-items: center;
             height: 100vh;
         }
-        #status { padding: 20px; font-size: 1.2em; font-weight: bold; }
+        #status { padding: 5px; font-size: 1.2em; font-weight: bold; }
         #board-container {
             width: 90vw;
             max-width: 600px;
             aspect-ratio: 1 / 1;
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
-        .btn-group { display: flex; gap: 10px; margin: 20px; flex-wrap: wrap; justify-content: center;}
+        #winrate-container {
+             width: 90vw;
+             max-width: 600px;
+             height: 80px;
+             background: #34495e;
+             margin-top: 5px;
+             border-radius: 4px;
+             position: relative;
+        }
+        .btn-group { display: flex; gap: 10px; margin: 15px; flex-wrap: wrap; justify-content: center;}
         button {
             padding: 10px 20px;
             border: none;
@@ -113,19 +123,24 @@
         </div>
     </div>
 
-    <div id="game-info" style="display:flex; justify-content:space-around; width:100%; max-width:600px; padding:10px; background:#34495e; margin: 50px 0 10px 0; border-radius:8px;">
+    <div id="game-info" style="display:flex; justify-content:space-around; width:100%; max-width:600px; padding:10px; background:#34495e; margin: 10px 0; border-radius:8px;">
         <div id="black-player">⚫ 黑方: ???</div>
         <div id="turn-indicator" style="font-weight:bold; color:#f1c40f;">加载中...</div>
         <div id="white-player">⚪ 白方: ???</div>
     </div>
     
     <div id="board-container"></div>
+    <div id="winrate-container">
+        <canvas id="winrate-chart"></canvas>
+    </div>
     <div id="status" style="font-size:0.9em; color:#bdc3c7; height:20px;"></div>
     
     <div class="btn-group">
         <button class="btn-undo" onclick="undo()">悔棋</button>
         <button class="btn-resign" onclick="resign()">认输</button>
         <button id="btn-estimate" class="btn-ai" onclick="estimateScore()">形势判断</button>
+        <button id="btn-recommend" class="btn-ai" style="display:none; background:#27ae60;" onclick="toggleRecommendation()">AI 推荐</button>
+        <button id="btn-ai-move" class="btn-ai" style="display:none; background:#8e44ad;" onclick="requestAiHelp()">AI 落子</button>
         <button class="btn-count" onclick="requestCount()">开始数目</button>
     </div>
 
@@ -133,6 +148,30 @@
         const urlParams = new URLSearchParams(window.location.search);
         const gameId = parseInt(urlParams.get('id'));
         const userId = parseInt(sessionStorage.getItem('user_id'));
+
+        // Define Custom Draw Handler for Solid Circle (AI Recommendation Stone) with Text
+        WGo.Board.drawHandlers.CRS = {
+            stone: {
+                draw: function(args, board) {
+                    const xr = board.getX(args.x);
+                    const yr = board.getY(args.y);
+                    const sr = board.stoneRadius;
+                    
+                    this.fillStyle = args.c || "rgba(0, 230, 118, 0.5)";
+                    this.beginPath();
+                    this.arc(xr, yr, sr, 0, 2 * Math.PI, true);
+                    this.fill();
+                    
+                    if (args.text) {
+                        this.fillStyle = "black";
+                        this.font = "bold " + (sr * 0.85) + "px sans-serif"; 
+                        this.textAlign = "center";
+                        this.textBaseline = "middle";
+                        this.fillText(args.text, xr, yr);
+                    }
+                }
+            }
+        };
 
         const socket = io();
         let currentStones = [];
@@ -143,6 +182,20 @@
         let pendingCoord = null; // 待确认的坐标 {x, y, gtp}
 
         let isSubmitting = false;
+
+        // Player Names Cache
+        let cachedBlackName = null;
+        let cachedWhiteName = null;
+        
+        // Chart Vars
+        let winrateChart = null;
+        let currentAiWinrates = [];
+
+        // AI Training vars
+        let isRecommendationMode = false;
+        let isEvolutionMode = false;
+        let recommendationData = null; 
+        let currentEvolutionPV = [];
         
         // --- Persistence Recovery ---
         let showingEstimate = false;
@@ -175,6 +228,12 @@
             socket.emit('join_room', {game_id: gameId});
         });
 
+        socket.on('winrate_update', (data) => {
+             if(data.game_id === gameId && data.winrates) {
+                 updateChart(data.winrates, currentStones.length);
+             }
+        });
+
         socket.on('board_update', (data) => {
             console.log("Board Update:", data);
             
@@ -182,6 +241,9 @@
             if (showingEstimate) {
                  console.log("Board updated, closing estimate.");
                  closeEstimate();
+            }
+            if (isRecommendationMode || isEvolutionMode) {
+                 closeRecommendation();
             }
 
             isSubmitting = false; // 服务器返回了，解除锁定，如果之前是乐观更新，现在会被权威状态覆盖
@@ -201,9 +263,22 @@
             }
 
             // 更新玩家信息
-            if (data.black_name) document.getElementById('black-player').innerText = `⚫ 黑方: ${data.black_name}` + (myColor === 'B' ? " (你)" : "");
-            if (data.white_name) document.getElementById('white-player').innerText = `⚪ 白方: ${data.white_name}` + (myColor === 'W' ? " (你)" : "");
+            if (data.black_name) {
+                 cachedBlackName = data.black_name;
+                 document.getElementById('black-player').innerText = `⚫ 黑方: ${data.black_name}` + (myColor === 'B' ? " (你)" : "");
+            }
+            if (data.white_name) {
+                 cachedWhiteName = data.white_name;
+                 document.getElementById('white-player').innerText = `⚪ 白方: ${data.white_name}` + (myColor === 'W' ? " (你)" : "");
+            }
             
+            // Handle Winrates
+            if (data.ai_winrates !== undefined) {
+                 updateChart(data.ai_winrates, currentStones.length);
+            }
+            
+            updateAIButtonVisibility();
+
             // 更新轮次指示
             const turnText = nextTurn === 'B' ? '黑棋下' : '白棋下';
             const ind = document.getElementById('turn-indicator');
@@ -357,6 +432,56 @@
                         });
                     }
                 });
+                
+                // 4. Draw Recommendation (Green Squares)
+                if (isRecommendationMode && !isEvolutionMode && recommendationData && !showingEstimate) {
+                    const top3 = recommendationData.slice(0, 3);
+                    top3.forEach(info => {
+                        const p = fromGTP(info.move);
+                        // Simply use winrate for opacity
+                        // Flip winrate if it's White's turn (KataGo returns Black winrate usually)
+                        // Actually, backend AI returns winrate for NEXT player usually?
+                        // Let's assume info.winrate is WINRATE for current side to move.
+                        let w = info.winrate;
+                        if (nextTurn === 'W') w = 1.0 - w; 
+
+                        const intensity = Math.max(0, Math.min(1, w));
+                        const alpha = Math.max(0.25, intensity).toFixed(2);
+                        const colorStr = `rgba(0, 230, 118, ${alpha})`;
+                        const winrateText = (w * 100).toFixed(1);
+
+                        board.addObject({
+                            type: "CRS",
+                            x: p.x,
+                            y: p.y,
+                            c: colorStr,
+                            text: winrateText
+                        });
+                    });
+                }
+                
+                // 5. Draw Evolution PV
+                if (isEvolutionMode && currentEvolutionPV && !showingEstimate) {
+                     let t = nextTurn;
+                     currentEvolutionPV.forEach((coord, index) => {
+                          if (coord.toUpperCase() === 'PASS') {
+                               t = (t==='B'?'W':'B');
+                               return;
+                          }
+                          const p = fromGTP(coord);
+                          const stoneColor = (t === 'B') ? WGo.B : WGo.W;
+                          board.addObject({
+                              x: p.x, y: p.y, c: stoneColor
+                          });
+                          board.addObject({
+                              type: "LB",
+                              x: p.x, y: p.y,
+                              c: (stoneColor === WGo.B) ? "white" : "black",
+                              text: (index + 1).toString()
+                          });
+                          t = (t==='B'?'W':'B');
+                     });
+                }
 
                 // 如果有待确认的子，绘制出来 (虚化的棋子/Outline)
                 if (pendingCoord) {
@@ -458,6 +583,20 @@
             // A. 形势判断模式下：静默拦截
             if (showingEstimate) {
                  return;
+            }
+            if (isEvolutionMode) return; 
+
+            if (isRecommendationMode) {
+                const gtp = toGTP(x, y);
+                if (x >=0 && y >=0 && x<19 && y<19) {
+                    const hit = recommendationData.slice(0, 3).find(info => info.move === gtp);
+                    if (hit) {
+                        isEvolutionMode = true;
+                        currentEvolutionPV = hit.pv;
+                        renderBoard();
+                    }
+                }
+                return;
             }
 
             // 旁观者不能落子
@@ -690,6 +829,188 @@
             const col = letters.indexOf(coord[0].toUpperCase());
             const row = 19 - parseInt(coord.slice(1));
             return {x: col, y: row};
+        }
+
+        // --- AI Recommendation Helpers ---
+        function updateAIButtonVisibility() {
+             const btnRec = document.getElementById('btn-recommend');
+             const btnMove = document.getElementById('btn-ai-move');
+             
+             if (!btnRec) return;
+             
+             // Use cached names if available
+             const blackName = cachedBlackName;
+             const whiteName = cachedWhiteName;
+
+             let isVsAI = false;
+             if (myColor === 'B' && whiteName && whiteName.includes("KataGo")) isVsAI = true;
+             if (myColor === 'W' && blackName && blackName.includes("KataGo")) isVsAI = true;
+             // Spectator
+             if (!myColor && (blackName?.includes("KataGo") || whiteName?.includes("KataGo"))) isVsAI = true;
+             
+             if (isVsAI) {
+                 btnRec.style.display = 'inline-block';
+                 
+                 // AI Move Button visibility logic
+                 if (btnMove) {
+                     // Check if it's my turn
+                     const isMyTurn = (myColor === nextTurn);
+                     if (isMyTurn) {
+                        btnMove.style.display = 'inline-block';
+                        btnMove.innerText = "AI 落子";
+                     } else {
+                        btnMove.style.display = 'none';
+                     }
+                 }
+             } else {
+                 btnRec.style.display = 'none';
+                 if (btnMove) btnMove.style.display = 'none';
+             }
+        }
+
+        function requestAiHelp() {
+            // Remove confirmation as requested
+            // if (!confirm("请求 AI 帮你落一子？")) return;
+            const btn = document.getElementById('btn-ai-move');
+            if(btn) btn.innerText = "思考中...";
+            socket.emit('request_ai_move', {game_id: gameId});
+        }
+
+        function toggleRecommendation() {
+            if (showingEstimate) { alert("请先关闭形势判断"); return; }
+            if (isEvolutionMode) { 
+                 isEvolutionMode = false;
+                 currentEvolutionPV = [];
+                 renderBoard();
+                 return; 
+            }
+            
+            if (isRecommendationMode) {
+                closeRecommendation();
+                return;
+            }
+            
+            const btn = document.getElementById('btn-recommend');
+            btn.innerText = "请求中...";
+            
+            socket.emit('estimate_score', {game_id: gameId}, (response) => {
+                 if (response && response.moveInfos) {
+                    isRecommendationMode = true;
+                    recommendationData = response.moveInfos;
+                    btn.innerText = "关闭推荐";
+                    btn.style.background = "#7f8c8d";
+                    renderBoard();
+                } else {
+                    btn.innerText = "AI 推荐";
+                    alert("获取推荐失败");
+                }
+            });
+        }
+        
+        function closeRecommendation() {
+            isEvolutionMode = false;
+            currentEvolutionPV = [];
+            isRecommendationMode = false;
+            recommendationData = null;
+            
+            const btn = document.getElementById('btn-recommend');
+            if (btn) {
+                btn.innerText = "AI 推荐";
+                btn.style.background = "#27ae60";
+            }
+            renderBoard();
+        }
+
+        // --- Chart Logic ---
+        function updateChart(winrates, totalMoves) {
+             currentAiWinrates = winrates;
+             
+             if (typeof Chart === 'undefined') {
+                 console.warn("Chart.js failed to load");
+                 document.getElementById('winrate-container').innerText = "Chart Lib Missing";
+                 return;
+             }
+             
+             const container = document.getElementById('winrate-container');
+             // container.style.display = 'block'; // Already block by CSS
+             
+             const ctx = document.getElementById('winrate-chart').getContext('2d');
+             
+             // Move 0: Default 42.5
+             let dataPoints = [42.5]; 
+             const scaled = winrates.map(w => parseFloat((w * 100).toFixed(1)));
+             dataPoints = dataPoints.concat(scaled);
+             
+             // Extend with nulls up to totalMoves to ensure X-axis reflects game progress
+             // This gives visual feedback even if AI data is lagging
+             while (dataPoints.length <= totalMoves) {
+                 dataPoints.push(null);
+             }
+             
+             const labels = Array.from({length: dataPoints.length}, (_, i) => i);
+
+             if (winrateChart) {
+                 winrateChart.data.labels = labels;
+                 winrateChart.data.datasets[0].data = dataPoints;
+                 winrateChart.data.datasets[1].data = dataPoints.map(x => x === null ? null : (100 - x));
+                 winrateChart.update();
+             } else {
+                 winrateChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            {
+                                label: '黑棋胜率',
+                                data: dataPoints,
+                                borderColor: '#000000', // Pitch Black
+                                backgroundColor: 'rgba(0,0,0,0)',
+                                borderWidth: 3, 
+                                pointRadius: 3,
+                                pointBackgroundColor: '#000000',
+                                tension: 0.1,
+                                yAxisID: 'y',
+                                spanGaps: true
+                            },
+                             {
+                                label: '白棋胜率',
+                                data: dataPoints.map(x => x === null ? null : (100 - x)),
+                                borderColor: '#ffffff', // Pure White
+                                borderWidth: 2,
+                                borderDash: [2, 2],
+                                pointRadius: 0,
+                                tension: 0.1,
+                                yAxisID: 'y'
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: { 
+                            legend: { display: false },
+                            tooltip: { 
+                                mode: 'index',
+                                intersect: false
+                            }
+                        },
+                        scales: {
+                            y: { 
+                                min: 0, 
+                                max: 100, 
+                                ticks: { callback: v => v+'%', color: '#bdc3c7', font: {size: 10} }, 
+                                grid: { color: '#555' } 
+                            },
+                            x: { 
+                                grid: { display: false },
+                                ticks: { color: '#bdc3c7', font: {size: 10} }
+                            }
+                        },
+                        animation: false
+                    }
+                });
+             }
         }
     </script>
 </body>

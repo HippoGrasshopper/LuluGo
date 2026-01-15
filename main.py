@@ -6,9 +6,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
 
-from database import init_db, create_user, get_user_by_username, create_game, get_game
+from database import init_db, create_user, get_user_by_username, create_game, create_ai_game, get_game
 from database import get_waiting_games, get_playing_games, get_history_games, update_game
-from database import get_all_users, delete_user_and_games
+from database import get_all_users, delete_user_and_games, get_session, User, select, get_username
 from game import GameEngine
 from ai import ai_engine
 import asyncio
@@ -70,6 +70,11 @@ async def logout(req: LoginRequest):
 @app.post("/api/games/create")
 async def api_create_game(req: CreateGameRequest):
     game = create_game(req.user_id, req.color)
+    return {"success": True, "game_id": game.id}
+
+@app.post("/api/games/create_ai")
+async def api_create_ai_game(req: CreateGameRequest):
+    game = create_ai_game(req.user_id)
     return {"success": True, "game_id": game.id}
 
 @app.get("/api/games/waiting")
@@ -224,6 +229,14 @@ async def join_room(sid, data):
     
     engine = active_games[game_id]
     
+    # Check if it's AI turn (e.g. at start of game or after reload)
+    try:
+         # Small delay to let client render first
+         # But better do it in separate task
+         asyncio.create_task(check_and_trigger_ai_move(game_id))
+    except Exception as e:
+         print(f"Failed to check AI move on join: {e}")
+         
     # 发送当前状态
     # 获取用户名
     from database import get_session
@@ -242,7 +255,8 @@ async def join_room(sid, data):
         "black_id": game.black_player_id,
         "white_id": game.white_player_id,
         "black_name": black_name,
-        "white_name": white_name
+        "white_name": white_name,
+        "ai_winrates": game.get_ai_winrates() 
     }, to=sid)
     
     print(f"[Room] User {user_id} 加入对局 {game_id} (Player: {is_player})")
@@ -267,8 +281,153 @@ async def run_analysis_and_save(game_id, moves):
                      session.add(game)
                      session.commit()
                      print(f"[AI] Saved winrate for game {game_id}: {winrate:.3f}")
+                     
+                     # Broadcast winrate update
+                     await sio.emit("winrate_update", {
+                         "game_id": game_id,
+                         "winrates": winrates
+                     }, room=f"game_{game_id}")
+
     except Exception as e:
         print(f"[AI] Background analysis failed: {e}")
+
+async def handle_ai_move(game_id, current_moves, ai_color):
+    """处理AI落子逻辑"""
+    await asyncio.sleep(1.0) # 思考时间模拟
+    
+    try:
+        # 1. Generate Move
+        # 使用较高的 visits 来作为对弈对手
+        result = await asyncio.to_thread(ai_engine.analyze, current_moves, max_visits=600)
+        
+        best_move_coord = None
+        if result and "moveInfos" in result and len(result["moveInfos"]) > 0:
+             best_move_coord = result["moveInfos"][0]["move"]
+        
+        if not best_move_coord:
+             best_move_coord = "PASS" 
+
+        # 2. Apply Move
+        if game_id not in active_games:
+             active_games[game_id] = GameEngine(initial_moves=current_moves)
+        engine = active_games[game_id]
+        
+        # Determine color (safely)
+        turn = 'B' if len(engine.moves) % 2 == 0 else 'W'
+        if turn != ai_color: 
+             print(f"[AI Error] Turn mismatch. Engine thinks {turn}, expected {ai_color}")
+             return
+
+        success, error_msg = engine.play_move(turn, best_move_coord)
+        
+        if success:
+             next_turn = 'W' if turn == 'B' else 'B'
+             update_game(game_id, moves_json=json.dumps(engine.moves), current_turn=next_turn)
+             
+             print(f"[AI Move] Game {game_id}: AI ({turn}) plays {best_move_coord}")
+             
+             await sio.emit("board_update", {
+                "moves": engine.get_current_stones(),
+                "turn": next_turn,
+                "last_move": best_move_coord,
+                "status": "PLAYING"
+             }, room=f"game_{game_id}")
+             
+             # Trigger analysis for user
+             asyncio.create_task(run_analysis_and_save(game_id, engine.moves))
+        else:
+             print(f"[AI Error] Failed to play move: {error_msg}")
+
+    except Exception as e:
+        print(f"[AI Error] {e}")
+
+async def check_and_trigger_ai_move(game_id):
+    """Utility to trigger AI move if it is AI's turn"""
+    try: 
+        game = get_game(game_id)
+        if not game or game.status != "PLAYING": return
+        
+        if game_id not in active_games: return
+        engine = active_games[game_id]
+        
+        from database import get_session, User, select
+        with get_session() as session:
+             ai_user = session.exec(select(User).where(User.username == "KataGo")).first()
+             if not ai_user: return
+             
+             is_ai_turn = False
+             if game.current_turn == 'B' and game.black_player_id == ai_user.id:
+                 is_ai_turn = True
+             elif game.current_turn == 'W' and game.white_player_id == ai_user.id:
+                 is_ai_turn = True
+                 
+             if is_ai_turn:
+                 print(f"[AI] Triggering move for Game {game_id} (Turn {game.current_turn})")
+                 await handle_ai_move(game_id, list(engine.moves), game.current_turn)
+    except Exception as e:
+        print(f"[AI Check Error] {e}")
+
+@sio.event
+async def request_ai_move(sid, data):
+    """请求AI帮我落子"""
+    try:
+        game_id = data["game_id"]
+        user_id = user_sessions.get(sid)
+        
+        if not user_id: return
+
+        game = get_game(game_id)
+        if not game or game.status != "PLAYING": return
+        
+        # 轮次验证
+        if game.current_turn == 'B' and user_id != game.black_player_id:
+            return
+        if game.current_turn == 'W' and user_id != game.white_player_id:
+            return
+
+        if game_id not in active_games:
+             active_games[game_id] = GameEngine(initial_moves=game.get_moves())
+        engine = active_games[game_id]
+        
+        # 1. Ask AI for best move (for ME)
+        current_moves = list(engine.moves)
+        result = await asyncio.to_thread(ai_engine.analyze, current_moves, max_visits=600)
+        
+        best_move_coord = "PASS"
+        if result and "moveInfos" in result and len(result["moveInfos"]) > 0:
+             best_move_coord = result["moveInfos"][0]["move"]
+             
+        # 2. Play the move
+        success, error_msg = engine.play_move(game.current_turn, best_move_coord)
+        
+        if not success:
+            await sio.emit("error", {"msg": f"AI落子失败: {error_msg}"}, to=sid)
+            return
+
+        # 3. Update DB
+        next_turn = 'W' if game.current_turn == 'B' else 'B'
+        update_game(game_id, moves_json=json.dumps(engine.moves), current_turn=next_turn)
+        
+        print(f"[AI-Assist] Game {game_id}: {game.current_turn} plays {best_move_coord} (AI Helped)")
+
+        # 4. Trigger Analysis
+        asyncio.create_task(run_analysis_and_save(game_id, engine.moves))
+
+        # 5. Broadcast
+        await sio.emit("board_update", {
+            "moves": engine.get_current_stones(),
+            "turn": next_turn,
+            "last_move": best_move_coord,
+            "status": "PLAYING"
+        }, room=f"game_{game_id}")
+        
+        # 6. Check for AI Turn (Opponent)
+        # Reuse logic from make_move? Or call the util.
+        # But wait, util check_and_trigger_ai_move fetches game from DB which we just updated.
+        asyncio.create_task(check_and_trigger_ai_move(game_id))
+
+    except Exception as e:
+        print(f"[Error] request_ai_move error: {str(e)}")
 
 @sio.event
 async def make_move(sid, data):
@@ -324,6 +483,27 @@ async def make_move(sid, data):
             "status": "PLAYING"
         }, room=f"game_{game_id}")
         
+        # Check for AI Turn
+        try:
+             with get_session() as session:
+                 ai_user = session.exec(select(User).where(User.username == "KataGo")).first()
+                 
+                 if ai_user:
+                     is_ai_turn = False
+                     if next_turn == 'B' and game.black_player_id == ai_user.id:
+                         is_ai_turn = True
+                     elif next_turn == 'W' and game.white_player_id == ai_user.id:
+                         is_ai_turn = True
+                     
+                     if is_ai_turn:
+                         # Important: Pass a COPY of moves or ensure thread safety if needed
+                         # engine.moves is a list, create_task might run later? 
+                         # Actually handle_ai_move waits immediately, but engine.moves might mutate if another move comes?
+                         # Normally user can't move if it's AI turn (frontend blocked), so engine.moves should be stable.
+                         asyncio.create_task(handle_ai_move(game_id, list(engine.moves), next_turn))
+        except Exception as e:
+            print(f"Error checking AI turn: {e}")
+
     except Exception as e:
         print(f"[Error] make_move error: {str(e)}")
         await sio.emit("error", {"msg": f"系统错误: {str(e)}"}, to=sid)
@@ -407,74 +587,96 @@ async def estimate_score(sid, data):
     # 直接透传整个结果给前端，前端去决定怎么展示
     return result
 
-@sio.event
-async def request_counting(sid, data):
-    """请求点目"""
-    game_id = data.get("game_id") # Fix: use .get for safety, though frontend sends it
-    # 转发给房间里的其他人 (主要是对手)
-    print(f"Processing counting request from {sid} for game {game_id}")
-    await sio.emit("counting_requested", {}, room=f"game_{game_id}", skip_sid=sid)
-
-@sio.event
-async def accept_counting(sid, data):
-    """接受点目，直接结算"""
-    game_id = data.get("game_id")
-    print(f"[Counting] 收到同意点目请求: game_id={game_id}, sid={sid}")
+async def perform_counting(game_id):
+    """【Util】执行终局点目并结束游戏"""
+    print(f"[Counting] 执行点目结算 (game_id={game_id})...")
     
     engine = active_games.get(game_id)
-    
-    # 尝试从 DB 恢复 moves 如果内存里没有 (防止服务器重启后卡死)
     if not engine:
         print(f"[Warning] Counting: Game {game_id} 内存丢失，尝试从数据库恢复...")
         db_game = get_game(game_id)
         if db_game:
-            # 恢复 Moves 列表供 AI 分析
             moves = db_game.get_moves()
-            engine = GameEngine() 
-            engine.moves = moves
-            # 暂时放回 active_games 以防后续逻辑需要，但在 game_over 后会删除
+            engine = GameEngine(initial_moves=moves)
             active_games[game_id] = engine
-            print(f"[Recover] Game {game_id} 恢复成功 (moves={len(moves)})")
+            print(f"[Recover] Game {game_id} 恢复成功")
         else:
             print(f"[Error] Game {game_id} 数据库中不存在")
-            # 也要通知前端因为无法处理
+            # TODO: Emit error? 
             return
-        
-    import asyncio
-    print(f"[Counting] 开始 AI 终局计算 (moves={len(engine.moves)})...")
-    
+
     try:
-        # ai_engine.analyze returns { "rootInfo": { "scoreLead": ... }, ... }
-        ai_result = await asyncio.to_thread(ai_engine.analyze, engine.moves, max_visits=800)
-        print(f"[Counting] AI 计算完成")
+        # 增加 visit 以保证点目准确
+        ai_result = await asyncio.to_thread(ai_engine.analyze, engine.moves, max_visits=1000)
     except Exception as e:
         print(f"[Error] AI analyze failed: {e}")
         return
 
-    # Handle the structure returned by MockKataGoWrapper
+    # 解析比分
+    score = 0.0
     if "rootInfo" in ai_result and "scoreLead" in ai_result["rootInfo"]:
         score = ai_result["rootInfo"]["scoreLead"]
     elif "lead" in ai_result:
-        score = ai_result["lead"] # Fallback if using old AI
+        score = ai_result["lead"]
     else:
-        score = 0.0 # Default fallback
         print(f"[Warning] 无法解析比分，默认 0.0. AI Result keys: {ai_result.keys()}")
-        
+
+    # KataGo scoreLead > 0 -> Black Win
     winner = 'B' if score > 0 else 'W'
     res_str = f"{winner}+{abs(score):.1f}"
     
-    # 更新数据库结束游戏
     update_game(game_id, status="ENDED", winner=winner, result_detail=res_str)
     print(f"[Counting] 游戏结束: {res_str}")
     
     await sio.emit("game_over", {
         "winner": winner,
         "result": res_str,
-        "reason": "双方便协点目结果"
+        "reason": "点目判定"
     }, room=f"game_{game_id}")
     
     if game_id in active_games:
         del active_games[game_id]
+
+
+@sio.event
+async def request_counting(sid, data):
+    """请求点目"""
+    game_id = data.get("game_id")
+    requester_id = user_sessions.get(sid)
+    
+    print(f"[Counting] Request from {sid} (uid={requester_id}) for game {game_id}")
+    
+    game = get_game(game_id)
+    if not game:
+        return
+
+    # 识别对手
+    opponent_id = None
+    if requester_id == game.black_player_id:
+        opponent_id = game.white_player_id
+    elif requester_id == game.white_player_id:
+        opponent_id = game.black_player_id
+
+    # 检查对手是否为 AI (KataGo)
+    is_vs_ai = False
+    if opponent_id:
+        opp_name = get_username(opponent_id)
+        if opp_name and "KataGo" in opp_name:
+            is_vs_ai = True
+            
+    if is_vs_ai:
+        print(f"[Counting] Detect AI opponent, auto-accepting counting.")
+        await perform_counting(game_id)
+    else:
+        # 转发给人类对手
+        await sio.emit("counting_requested", {}, room=f"game_{game_id}", skip_sid=sid)
+
+@sio.event
+async def accept_counting(sid, data):
+    """接受点目，直接结算"""
+    game_id = data.get("game_id")
+    print(f"[Counting] Human accepted counting: game_id={game_id}")
+    await perform_counting(game_id)
 
 # ==================== 启动 ====================
 
