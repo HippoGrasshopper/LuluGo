@@ -159,6 +159,7 @@
         let trialMoves = [];
         let trialStartStep = 0;
         let currentTrialStep = 0;
+        let currentGameState = null;
 
         // --- AI Recommendation State ---
         let isRecommendationMode = false;
@@ -329,6 +330,7 @@
         function render() {
             saveState();
             const game = new WGo.Game(19);
+            currentGameState = game;
             
             // 1. Base Moves
             const realLimit = isTrialMode ? trialStartStep : currentStep;
@@ -563,6 +565,19 @@
                 }
             }
             
+            // Disable navigation controls during Evolution Mode or Estimation or Recommendation
+            const navBtns = ['btn-start', 'btn-prev', 'btn-next', 'btn-end'];
+            const shouldDisableNav = isEvolutionMode || showingEstimate || isRecommendationMode;
+            
+            navBtns.forEach(id => {
+                const b = document.getElementById(id);
+                if(b) {
+                    b.disabled = shouldDisableNav;
+                    b.style.opacity = shouldDisableNav ? "0.5" : "1";
+                    b.style.cursor = shouldDisableNav ? "not-allowed" : "pointer";
+                } 
+            });
+            
             if (showingEstimate) {
                 // If estimating, disable almost everything
                 slider.disabled = true;
@@ -605,12 +620,17 @@
         }
         
         function closeRecommendation() {
-            // Reset ALL AI states to exit completely
-            isEvolutionMode = false;
-            currentEvolutionPV = [];
-            isRecommendationMode = false;
-            recommendationData = null;
-            render();
+            if (isEvolutionMode) {
+                 // Return to Recommendation View (Green spots)
+                 isEvolutionMode = false;
+                 currentEvolutionPV = [];
+                 render();
+            } else {
+                 // Exit Recommendation entirely
+                 isRecommendationMode = false;
+                 recommendationData = null;
+                 render();
+            }
         }
 
         // --- Estimation Logic ---
@@ -702,6 +722,12 @@
             }
 
             if (x < 0 || y < 0 || x >= 19 || y >= 19) return;
+            
+            // Fix: Check if position is already occupied
+            if (currentGameState && currentGameState.getPosition().get(x,y) !== 0) {
+                 return;
+            }
+
             const gtp = toGTP(x, y);
 
             // Normal Trial Logic
@@ -722,13 +748,28 @@
         // --- Standard Controls ---
         function jumpTo(step) {
              if (showingEstimate) { alert("请先关闭形势判断"); return; }
-             if (isTrialMode) return;
-             currentStep = parseInt(step);
+             if (isEvolutionMode || isRecommendationMode) { return; }
+             
+             step = parseInt(step);
+
+             if (isTrialMode) {
+                 if (step === 0) {
+                     currentTrialStep = 0;
+                 } else {
+                     // Assume End button (or any non-zero click) goes to end of trial
+                     currentTrialStep = trialMoves.length;
+                 }
+                 render();
+                 return;
+             }
+             
+             currentStep = step;
              render();
         }
         
         function step(d) {
              if (showingEstimate) { alert("请先关闭形势判断"); return; }
+             if (isEvolutionMode || isRecommendationMode) { return; }
              if (isTrialMode) {
                  const n = currentTrialStep + d;
                  if (n >= 0 && n <= trialMoves.length) {
